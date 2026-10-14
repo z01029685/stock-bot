@@ -1,0 +1,27 @@
+name: Taiwan Stock Daily Breakout Scan
+
+on:
+  schedule:
+    # 台灣時間週一至週五下午 14:00 自動執行（UTC 06:00）
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch: # 支援手動隨時點擊測試
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas tabulate requests
+
+      - name: Run Stock Breakout Scan
+        run: |
+          python tw_stock_breakout_monitor.py

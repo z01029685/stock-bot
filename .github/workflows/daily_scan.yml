@@ -24,4 +24,4 @@ jobs:
 
       - name: Run Stock Breakout Scan
         run: |
-          python tw_stock_breakout_monitor.py
+          python tw_stock_breakout_monitor.py --market all

@@ -21,11 +21,9 @@
    - 昨日收盤仍在切線之下，今日首度帶量長紅「破切站上切線」！
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
 
-【執行模式】
-- 預設模式 (極速推薦): python tw_stock_breakout_monitor.py
-  (自動多執行緒掃描台股前 220 大高流動性與熱門成長主力股)
-- 全市場大掃描:       python tw_stock_breakout_monitor.py --market all
-  (自動連線證交所名冊，掃描全台股 1,800+ 檔上市櫃普通股)
+【官方帳號公開群發推播 (Broadcast)】
+- 支援 LINE 官方帳號「廣播訊息 API (Broadcast)」
+- 只要任何人加你的官方帳號為好友，盤後就會自動全員同步收到推播，完全不用查任何人的 User ID！
 =============================================================================
 """
 
@@ -65,8 +63,13 @@ except ImportError:
 # 系統預設參數設定 (已綁定你的專屬 LINE 設定)
 # =============================================================================
 DEFAULT_CONFIG = {
-    # 你的專屬 LINE Messaging API 設定 (推播至個人手機 LINE)
+    # 你的專屬 LINE 官方帳號設定
     "line_channel_access_token": "9ipOm1j5q30aCiczxs4aVEWmOeGTvUa4UF4W6Tj0O3EKW7VUpqQQPrCUmoyzRpfFDWvqtjGKzjOPTI+W6gZQhXObM9nw+xvRPCZ+8tabcneFntw+VwRIqCKh6nBljUFIeA11il0D24qHH7NxQLK/TwdB04t89/1O/w1cDnyilFU=",
+    
+    # 【公開廣播模式 (Broadcast)】:
+    # 設為 True 時，只要加你官方帳號為好友的所有人，都會同時收到公開推播！(無需填寫任何 user_id)
+    # 設為 False 時，僅會私訊給下方 line_user_id 指定的單一對象。
+    "line_broadcast": True,
     "line_user_id": "U5d37c903cbc9e6442aa86bde5e830125",
 
     # 技術面通用門檻
@@ -219,11 +222,11 @@ def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[b
 
 def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """型態 2：疑似圓弧底 (U型底) 突破第一根 (打底約 1 個月)"""
-    lookback = config["base_lookback_days"] # 28 天
+    lookback = config["base_lookback_days"]
     if len(df) < lookback + 10:
         return False, {}
 
-    sub_df = df.iloc[-(lookback + 2) : -1] # 觀察區間排除今天
+    sub_df = df.iloc[-(lookback + 2) : -1]
     today = df.iloc[-1]
     yesterday = df.iloc[-2]
 
@@ -233,7 +236,6 @@ def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[boo
     left_high = left_part['High'].max()
     mid_low = mid_part['Low'].min()
 
-    # 碗底深度至少 4%
     bowl_depth = (left_high - mid_low) / left_high * 100
     if bowl_depth < 4.0:
         return False, {}
@@ -252,7 +254,7 @@ def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[boo
 
 def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """型態 3：疑似頭肩底「破切」第一根 (兩反彈高點頸線切線)"""
-    lookback = config["base_lookback_days"] # 28 天
+    lookback = config["base_lookback_days"]
     if len(df) < lookback + 10:
         return False, {}
 
@@ -261,11 +263,9 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     yesterday = df.iloc[-2]
     n = len(sub_df)
 
-    # 尋找全區最低點作為頭部 (Head)
     head_rel_idx = sub_df['Low'].values.argmin()
     head_price = sub_df['Low'].iloc[head_rel_idx]
 
-    # 頭部必須落在區間中間 20%~75%
     if head_rel_idx < int(n * 0.2) or head_rel_idx > int(n * 0.75):
         return False, {}
 
@@ -275,24 +275,20 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     if len(left_sub) < 3 or len(right_sub) < 3:
         return False, {}
 
-    # P1: 左側反彈高點
     p1_rel_idx = left_sub['High'].values.argmax()
     p1_price = left_sub['High'].iloc[p1_rel_idx]
     l1_price = left_sub['Low'].iloc[: max(1, p1_rel_idx + 1)].min()
 
-    # P2: 右側反彈高點
     p2_rel_idx = right_sub['High'].values.argmax()
     p2_price = right_sub['High'].iloc[p2_rel_idx]
     p2_global_idx = head_rel_idx + 1 + p2_rel_idx
     l2_price = right_sub['Low'].min()
 
-    # 檢驗三底：Head 必須比左肩低且比右肩低 (右肩不破底)
     if head_price >= l1_price or head_price >= l2_price:
         return False, {}
     if l2_price <= head_price:
         return False, {}
 
-    # 頸線切線方程: y = m * x + b
     x1 = p1_rel_idx
     x2 = p2_global_idx
     if x2 <= x1:
@@ -315,7 +311,6 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
 
 def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
     """綜合檢驗三種型態，並套用量價配合與均線濾網"""
-    # 均線與成交量
     df = df.copy()
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
@@ -432,7 +427,7 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
 
 
 # =============================================================================
-# 核心模組 4：報表輸出與 LINE 即時推播
+# 核心模組 4：報表輸出與 LINE 官方帳號公開廣播 (Broadcast)
 # =============================================================================
 def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, Any]):
     hits = [r for r in results if r["qualified"]]
@@ -468,12 +463,12 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
     pd.DataFrame(results).to_csv(csv_file, index=False, encoding="utf-8-sig")
     print(f"[CSV 報告] 已匯出完整分析至: {csv_file}")
 
-    # LINE Messaging API 推播
+    # LINE 官方帳號發送 (支援廣播 Broadcast 與 單人 Push)
     line_token = config.get("line_channel_access_token")
+    is_broadcast = config.get("line_broadcast", True)
     line_uid = config.get("line_user_id")
     
-    if hits and line_token and line_uid and HAS_REQUESTS:
-        print("\n[LINE 推播] 正在發送型態突破警示至你的手機 LINE...")
+    if hits and line_token and HAS_REQUESTS:
         today_date = datetime.date.today().strftime("%Y/%m/%d")
         msg_lines = [
             f"🔥【台股型態突破精選】({today_date})",
@@ -490,17 +485,39 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             )
         alert_text = "\n".join(msg_lines)
 
-        try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {line_token}"
+        }
+
+        # 模式 A: 官方帳號公開群發廣播 (Broadcast) - 全員同步接收
+        if is_broadcast:
+            print("\n[LINE 官方帳號] 正在進行【全員公開廣播推播 (Broadcast)】...")
+            url = "https://api.line.me/v2/bot/message/broadcast"
+            payload = {"messages": [{"type": "text", "text": alert_text}]}
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=10)
+                if resp.status_code == 200:
+                    print("✓ [廣播成功] 訊息已公開推播給所有加官方帳號好友的用戶！")
+                else:
+                    print(f"✗ [廣播失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
+            except Exception as e:
+                print(f"✗ [連線異常] {e}")
+
+        # 模式 B: 私訊單一對象 (Push)
+        elif line_uid:
+            print("\n[LINE 私訊] 正在發送至指定 User ID...")
             url = "https://api.line.me/v2/bot/message/push"
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {line_token}"}
             payload = {"to": line_uid, "messages": [{"type": "text", "text": alert_text}]}
-            resp = requests.post(url, headers=headers, json=payload, timeout=10)
-            if resp.status_code == 200:
-                print("✓ [推播成功] LINE 訊息已送達你的手機！")
-            else:
-                print(f"✗ [推播失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
-        except Exception as e:
-            print(f"✗ [推播異常] {e}")
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=10)
+                if resp.status_code == 200:
+                    print("✓ [私訊成功] LINE 訊息已送達個人手機！")
+                else:
+                    print(f"✗ [私訊失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
+            except Exception as e:
+                print(f"✗ [連線異常] {e}")
+
     elif not hits:
         print("\n[通知] 今日掃描無符合三大型態之標的，不發送推播干擾。")
 

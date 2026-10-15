@@ -3,7 +3,7 @@ name: Taiwan Stock Daily Breakout Scan
 on:
   schedule:
     # 台灣時間週一至週五下午 14:00 自動執行（UTC 06:00）
-    - cron: '0 6 * * 1-5'
+    - cron: '0 14 * * 1-5'
   workflow_dispatch: # 支援手動隨時點擊測試
 
 jobs:

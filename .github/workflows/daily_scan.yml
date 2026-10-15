@@ -3,7 +3,7 @@ name: Taiwan Stock Daily Breakout Scan
 on:
   schedule:
     - cron: '5 6 * * 1-5'
-  workflow_dispatch: # 支援手動隨時點擊測試
+  workflow_dispatch:
 
 jobs:
   scan:

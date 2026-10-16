@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「五大經典強勢起漲型態」全自動極速監控腳本
+台股「五大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
 =============================================================================
 【五大起漲型態演算法】
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
@@ -23,17 +23,14 @@
 4. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1):
    - 5 日線 (5MA)、10 日線 (10MA)、20 日線 (20MA) 極致糾結壓縮 (三線差幅 <= 2.0%)。
    - 今日帶量收實體紅 K，股價同時強勢站上 5MA、10MA、20MA，均線開始形成多頭向上發散！
-5. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1) [全新新增]:
-   - 強勢多頭格局：均線呈多頭架構 (20MA > 60MA 且股價站穩 20MA 月線)。
-   - 強勢淺回檔：前 1~3 天回檔跌破 5T 均線 (昨日收盤價 < 5MA)，但守穩在月線 20MA 之上。
-   - 今日重新站回 5T：今日收實體紅 K，收盤價首度重新站上 5T 線 (Close > 5MA)！
-   - 轉強買點：回檔洗盤結束、重啟多頭動能的絕佳右側切入點。
+5. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1):
+   - 強勢多頭格局：20MA > 60MA 且股價站穩 20MA 月線。
+   - 強勢短洗盤：前 1~3 天回檔跌破 5T 均線 (昨日收盤價 < 5MA)，但守穩在月線 20MA 之上。
+   - 今日重新站回 5T：今日收實體紅 K (漲幅>=1.5%)，收盤價首度重新站上 5T 線！
 
-【執行模式】
-- 預設模式 (極速推薦): python tw_stock_breakout_monitor.py
-  (自動多執行緒掃描台股前 220 大高流動性與熱門成長主力股)
-- 全市場大掃描:       python tw_stock_breakout_monitor.py --market all
-  (自動連線證交所名冊，掃描全台股 1,800+ 檔上市櫃普通股)
+【完整全名單推播 (無截斷)】
+- 不再限制只推送前幾檔！只要符合條件的股票「全部完整列出」。
+- 自動依 450 字上限分拆訊息泡泡，並以每批最多 5 個泡泡自動連續發送，確保全市場命中標的 100% 送達手機！
 =============================================================================
 """
 
@@ -85,22 +82,27 @@ DEFAULT_CONFIG = {
     "require_red_candle": True,  # 必須收實體紅 K (Close > Open)
     "require_above_ma20": True,  # 股價必須站上 20MA (月線)
     "require_above_ma60": True,  # 股價必須站上 60MA (季線)
-    "min_volume_shares": 300,    # 每日最低成交張數 (過濾低於 300 張之冷門股)
+    "min_volume_shares": 500,    # 每日最低成交張數 (500 張)
 
     # 均線糾結參數設定
-    "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 差幅門檻 (預設 2.0% 以內視為極致糾結)
+    "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 差幅門檻 (2.0% 以內視為極致糾結)
 
-    # 「回後買上漲」特定參數
-    "reclaim_5ma_require_above_20ma": True, # 回檔跌破 5MA 時，低點必須守住 20MA (月線不破)
+    # 「回後買上漲」精準過濾參數
+    "reclaim_5ma_max_pullback_bars": 3, # 跌破 5MA 的回檔天數必須在 3 天以內
+    "reclaim_5ma_min_gain_pct": 1.5,    # 今日站回 5T 之紅 K 漲幅至少 1.5% 以上
+    "reclaim_5ma_vol_ratio": 1.2,       # 今日成交量至少為 5MA 均量的 1.2 倍
 
     # 各型態特定時間參數 (打底約 1 個月)
     "base_lookback_days": 28,    # 圓弧底與頭肩底打底觀察天數 (約 1 個月，20~30天)
     "swing_high_window": 40,     # 回檔突破前高的回溯天數 (40天)
     "min_pullback_bars": 3,      # 前高回檔最少天數 (3天)
 
+    # LINE 訊息泡泡設定
+    "line_bubble_max_chars": 450,# 單個文字泡泡字數限制 (小於官方 500 字上限)
+
     # 超時防卡死參數
     "ticker_timeout_sec": 3.0,   # 單檔行情抓取超時上限 (秒)
-    "max_scan_total_sec": 240,   # 全程掃描最長執行時間 (秒，預設 4 分鐘自動收尾)
+    "max_scan_total_sec": 600,   # 全程掃描最長執行時間 (10 分鐘)
     
     "discord_webhook_url": "",
 }
@@ -343,7 +345,6 @@ def check_ma_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple
 
     threshold = config.get("ma_squeeze_threshold_pct", 2.0)
     is_squeezed = spread_pct <= threshold
-
     above_all_mas = float(today['Close']) > max_ma
 
     if is_squeezed and above_all_mas:
@@ -358,10 +359,6 @@ def check_ma_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple
 def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """
     型態 5：強勢股【回後買上漲】（均線多頭回檔跌破5T線，今日首度重新站上5T第一根）
-    1. 多頭架構：股價在月線 (20MA) 之上，且 20MA > 60MA (短中期多頭趨勢良好)。
-    2. 強勢回檔：昨日收盤價跌破 5MA，但守穩在月線 20MA 之上 (未被跌爛的良性洗盤)。
-    3. 今日重新站上：今日收盤價正式站回 5MA (Close > 5MA)！
-    4. 實體紅 K：收盤價 > 開盤價。
     """
     if len(df) < 65:
         return False, {}
@@ -369,24 +366,27 @@ def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tupl
     today = df.iloc[-1]
     yesterday = df.iloc[-2]
 
-    # 1. 均線多頭架構 (20MA > 60MA 且收盤價站穩 20MA 月線)
     uptrend_ok = (today['MA20'] > today['MA60']) and (today['Close'] > today['MA20'])
+    max_pullback = config.get("reclaim_5ma_max_pullback_bars", 3)
+    recent_bars = df.iloc[-(max_pullback + 1) : -1]
+    under_5ma_count = sum(recent_bars['Close'] < recent_bars['MA5'])
+    is_valid_pullback = (under_5ma_count >= 1) and (yesterday['Close'] < yesterday['MA5'])
+    held_20ma = (recent_bars['Low'].min() >= recent_bars['MA20'].min() * 0.99)
 
-    # 2. 昨日跌破 5MA，但維持在 20MA 之上 (強勢淺回檔，非翻空)
-    yesterday_under_5ma = yesterday['Close'] < yesterday['MA5']
-    yesterday_above_20ma = yesterday['Close'] >= yesterday['MA20'] if config.get("reclaim_5ma_require_above_20ma", True) else True
-
-    # 3. 今日重新站上 5MA 第一根
     today_reclaim_5ma = today['Close'] > today['MA5']
+    min_gain = config.get("reclaim_5ma_min_gain_pct", 1.5)
+    price_change_pct = ((today['Close'] - yesterday['Close']) / yesterday['Close']) * 100
+    is_red_candle = (today['Close'] > today['Open']) and (price_change_pct >= min_gain)
 
-    # 4. 實體紅 K
-    is_red_candle = today['Close'] > today['Open']
+    ref_vol_ma = yesterday['Vol_MA5']
+    vol_ratio = (today['Volume'] / ref_vol_ma) if ref_vol_ma > 0 else 0.0
+    vol_reclaim_ok = (vol_ratio >= config.get("reclaim_5ma_vol_ratio", 1.2)) or (today['Volume'] >= yesterday['Volume'] * 1.1)
 
-    if uptrend_ok and yesterday_under_5ma and yesterday_above_20ma and today_reclaim_5ma and is_red_candle:
+    if uptrend_ok and is_valid_pullback and held_20ma and today_reclaim_5ma and is_red_candle and vol_reclaim_ok:
         return True, {
             "name": "回後買上漲",
             "key_price": round(float(today['MA5']), 2),
-            "detail": f"多頭強勢回檔守穩月線，今日紅K重返5T線({today['MA5']:.2f})展開反彈"
+            "detail": f"回檔守月線，紅K(+{price_change_pct:.1f}%)重返5T線"
         }
     return False, {}
 
@@ -404,7 +404,6 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     yesterday = df.iloc[-2]
     today_date = today.name.strftime('%Y-%m-%d') if hasattr(today.name, 'strftime') else str(today.name)
 
-    # 1. 基礎濾網：量價配合 (放量 1.5 倍 + 實體紅 K)
     ref_vol_ma = yesterday['Vol_MA5']
     vol_ratio = (today['Volume'] / ref_vol_ma) if ref_vol_ma > 0 else 0.0
     is_red_candle = (today['Close'] > today['Open'])
@@ -412,18 +411,15 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     
     vol_qualified = (vol_ratio >= config["vol_multiplier"])
     candle_qualified = is_red_candle if config["require_red_candle"] else (price_change_pct > 0)
-    volume_price_ok = vol_qualified and candle_qualified
+    standard_volume_price_ok = vol_qualified and candle_qualified
 
-    # 2. 均線濾網：站上月線 (20MA) 與季線 (60MA)
     above_ma20 = (today['Close'] > today['MA20']) if config["require_above_ma20"] else True
     above_ma60 = (today['Close'] > today['MA60']) if (config["require_above_ma60"] and pd.notnull(today['MA60'])) else True
     ma_ok = above_ma20 and above_ma60
 
-    # 3. 流動性濾網 (成交張數 >= 300 張)
     volume_shares = int(today['Volume'] / 1000)
-    liquidity_ok = volume_shares >= config.get("min_volume_shares", 300)
+    liquidity_ok = volume_shares >= config.get("min_volume_shares", 500)
 
-    # 4. 型態檢驗 (支援五大經典型態與複合觸發)
     matched_patterns = []
     details = []
     key_prices = []
@@ -456,7 +452,7 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
         details.append(p4_info["detail"])
         key_prices.append(f"糾結頂 {p4_info['key_price']}")
 
-    # 型態 5: 強勢股【回後買上漲】(破5T後重新站回5T第一根)
+    # 型態 5: 強勢股【回後買上漲】
     p5_ok, p5_info = check_reclaim_5ma_breakout(df, config)
     if p5_ok:
         matched_patterns.append("【回後買上漲】")
@@ -464,10 +460,7 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
         key_prices.append(f"5T線 {p5_info['key_price']}")
 
     is_pattern_hit = len(matched_patterns) > 0
-
-    # 注意：若命中「回後買上漲」，只要量能大於昨日成交量 (量增紅K) 或符合基礎量比，均視為合格轉強
-    is_reclaim_special = ("【回後買上漲】" in matched_patterns) and is_red_candle and (today['Volume'] >= yesterday['Volume'])
-    is_volume_valid = volume_price_ok or is_reclaim_special
+    is_volume_valid = standard_volume_price_ok or ("【回後買上漲】" in matched_patterns)
 
     fully_qualified = is_pattern_hit and is_volume_valid and ma_ok and liquidity_ok
 
@@ -487,7 +480,7 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
 
 
 # =============================================================================
-# 核心模組 3：高並行高速掃描 (含超時收尾機制)
+# 核心模組 3：高並行高速掃描
 # =============================================================================
 def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(item, tuple):
@@ -509,7 +502,7 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
     print(f"\n[極速掃描啟動] 正以多執行緒 (Threads: {max_workers}) 掃描 {len(stock_candidates)} 檔標的...")
     results = []
     start_t = time.time()
-    max_total_sec = config.get("max_scan_total_sec", 240)
+    max_total_sec = config.get("max_scan_total_sec", 600)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(scan_stock_worker, item, config): item for item in stock_candidates}
@@ -518,7 +511,7 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
         
         for future in as_completed(futures):
             done_count += 1
-            if done_count % 25 == 0 or done_count == total_count:
+            if done_count % 30 == 0 or done_count == total_count:
                 print(f"  > 掃描進度: {done_count}/{total_count} ({done_count/total_count*100:.1f}%) ...", end="\r")
             try:
                 res = future.result()
@@ -528,7 +521,7 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
                 continue
 
             if time.time() - start_t > max_total_sec:
-                print(f"\n[保護機制] 達到預設時間上限 ({max_total_sec}秒)，平滑收尾目前已完成的 {len(results)} 檔分析結果！")
+                print(f"\n[超時防護提醒] 掃描達到 {max_total_sec} 秒上限，自動收尾匯出目前已完成之 {len(results)} 檔標的！")
                 break
 
     elapsed = time.time() - start_t
@@ -537,8 +530,55 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
 
 
 # =============================================================================
-# 核心模組 4：報表輸出與 LINE 官方帳號公開廣播
+# 核心模組 4：LINE 官方帳號全標的無截斷推播 (多泡泡自動分批發送)
 # =============================================================================
+def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    不限檔數！將所有符合條件的標的全部完整列出，自動分派到多個泡泡中 (每個泡泡 <= 450 字)。
+    """
+    if not hits:
+        return []
+
+    max_chars = config.get("line_bubble_max_chars", 450)
+    today_date = datetime.date.today().strftime("%Y/%m/%d")
+
+    # 緊湊高密度條列格式 (每檔約 32~38 字，完整列出型態與關鍵數據)
+    formatted_items = []
+    for h in hits:
+        symbol = h.get("symbol", "")
+        name = h.get("name", "")
+        close = h.get("close", 0)
+        pct = h.get("change_pct", 0)
+        patterns = h.get("matched_patterns", "")
+        vol = h.get("vol_ratio", 0)
+        detail = h.get("pattern_details", "")
+        
+        item_str = f"• {symbol} {name} {close} ({pct:+.2f}%)\n  {patterns} | 量比:{vol}x ({detail})"
+        formatted_items.append(item_str)
+
+    bubbles = []
+    header = f"🔥【台股型態突破全名單】({today_date})\n共篩選出 {len(hits)} 檔強勢起漲/轉強標的："
+    current_bubble_lines = [header, "-----------------------------"]
+    current_len = len(header) + 32
+
+    for item in formatted_items:
+        item_len = len(item) + 4
+        # 若加入此檔股票會超過 450 字，則開立新泡泡
+        if current_len + item_len > max_chars:
+            bubbles.append("\n\n".join(current_bubble_lines))
+            current_bubble_lines = [item]
+            current_len = item_len
+        else:
+            current_bubble_lines.append(item)
+            current_len += item_len
+
+    if current_bubble_lines:
+        bubbles.append("\n\n".join(current_bubble_lines))
+
+    # 包裝為 LINE Messaging API 的 messages 物件清單
+    return [{"type": "text", "text": b} for b in bubbles]
+
+
 def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, Any]):
     hits = [r for r in results if r["qualified"]]
     hits = sorted(hits, key=lambda x: x["change_pct"], reverse=True)
@@ -546,6 +586,7 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
     headers = ["代號", "名稱/備註", "收盤價", "今日漲跌", "命中型態", "關鍵價位", "量比(5MA)", "成交張數", "判定"]
     table_rows = []
     
+    # 終端機表格完整列出所有命中標的！
     display_list = hits if hits else results[:15]
     for r in display_list:
         status_flag = "🎯 命中推薦" if r["qualified"] else "— 未符合"
@@ -567,6 +608,7 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             print(row)
     print("=" * 96)
 
+    # 匯出 CSV 完整紀錄
     today_str = datetime.date.today().strftime("%Y%m%d")
     csv_file = f"tw_breakout_scan_{today_str}.csv"
     pd.DataFrame(results).to_csv(csv_file, index=False, encoding="utf-8-sig")
@@ -577,52 +619,45 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
     line_uid = config.get("line_user_id")
     
     if hits and line_token and HAS_REQUESTS:
-        today_date = datetime.date.today().strftime("%Y/%m/%d")
-        msg_lines = [
-            f"🔥【台股型態突破精選】({today_date})",
-            f"共篩選出 {len(hits)} 檔「放量紅K + 站上關鍵均線」強勢突破標的：",
-            "-----------------------------"
-        ]
-        for h in hits[:10]:
-            msg_lines.append(
-                f"▶ {h['symbol']} {h.get('name', '')}\n"
-                f"  現價: {h['close']} ({h['change_pct']:+.2f}%) | 量比: {h['vol_ratio']}倍\n"
-                f"  型態: {h['matched_patterns']}\n"
-                f"  價位: {h['key_prices']}\n"
-                f"  說明: {h['pattern_details']}\n"
-            )
-        alert_text = "\n".join(msg_lines)
+        message_bubbles = build_all_line_message_bubbles(hits, config)
+        print(f"\n[LINE 訊息建構] 已將全部 {len(hits)} 檔股票完整切分為 {len(message_bubbles)} 個短訊息泡泡！")
 
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {line_token}"
         }
 
-        if is_broadcast:
-            print("\n[LINE 官方帳號] 正在進行【全員公開廣播推播 (Broadcast)】...")
-            url = "https://api.line.me/v2/bot/message/broadcast"
-            payload = {"messages": [{"type": "text", "text": alert_text}]}
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=10)
-                if resp.status_code == 200:
-                    print("✓ [廣播成功] 訊息已公開推播給所有加官方帳號好友的用戶！")
-                else:
-                    print(f"✗ [廣播失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
-            except Exception as e:
-                print(f"✗ [連線異常] {e}")
+        # LINE API 單次請求最多支援發送 5 個泡泡，若超過 5 個則分批次全部發送完畢，一檔不漏！
+        for batch_idx in range(0, len(message_bubbles), 5):
+            batch_bubbles = message_bubbles[batch_idx : batch_idx + 5]
+            
+            # 廣播模式 (Broadcast)
+            if is_broadcast:
+                print(f"[LINE 官方帳號] 正在廣播發送第 {batch_idx//5 + 1} 批泡泡 ({len(batch_bubbles)} 則)...")
+                url = "https://api.line.me/v2/bot/message/broadcast"
+                payload = {"messages": batch_bubbles}
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=12)
+                    if resp.status_code == 200:
+                        print(f"✓ [廣播成功] 第 {batch_idx//5 + 1} 批已公開送達！")
+                    else:
+                        print(f"✗ [廣播失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
+                except Exception as e:
+                    print(f"✗ [連線異常] {e}")
 
-        elif line_uid:
-            print("\n[LINE 私訊] 正在發送至指定 User ID...")
-            url = "https://api.line.me/v2/bot/message/push"
-            payload = {"to": line_uid, "messages": [{"type": "text", "text": alert_text}]}
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=10)
-                if resp.status_code == 200:
-                    print("✓ [私訊成功] LINE 訊息已送達個人手機！")
-                else:
-                    print(f"✗ [私訊失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
-            except Exception as e:
-                print(f"✗ [連線異常] {e}")
+            # 私訊模式 (Push)
+            elif line_uid:
+                print(f"[LINE 私訊] 正在發送第 {batch_idx//5 + 1} 批泡泡至個人...")
+                url = "https://api.line.me/v2/bot/message/push"
+                payload = {"to": line_uid, "messages": batch_bubbles}
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=12)
+                    if resp.status_code == 200:
+                        print(f"✓ [私訊成功] 第 {batch_idx//5 + 1} 批已送達個人手機！")
+                    else:
+                        print(f"✗ [私訊失敗] 狀態碼: {resp.status_code}, 原因: {resp.text}")
+                except Exception as e:
+                    print(f"✗ [連線異常] {e}")
 
     elif not hits:
         print("\n[通知] 今日掃描無符合強勢型態之標的，不發送推播干擾。")

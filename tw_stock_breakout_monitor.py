@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「四大經典強勢突破型態」全自動極速監控腳本
+台股「五大經典強勢起漲型態」全自動極速監控腳本
 =============================================================================
-【四大突破型態演算法】
+【五大起漲型態演算法】
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
    - 40 天波段高點後，至少回檔整理 3 天以上。
    - 昨日收盤價 < 前高，今日收盤價 > 前高 (首根站上)。
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
 2. 【疑似圓弧底突破第一根】 (Rounding Bottom Breakout Bar 1):
    - 打底時間約 1 個月 (20~30 個交易日)，形成圓弧狀凹底。
-   - 碗底深度 >= 4%，均線走平糾結翻揚。
+   - 碗底深度 >= 4%，均線走平翻揚。
    - 昨日收盤價仍在碗緣頸線之下，今日出量長紅首度站上頸線。
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
 3. 【疑似頭肩底「破切」第一根】 (Head & Shoulders Bottom Breakout of Neckline):
@@ -20,10 +20,14 @@
    - 兩次反彈高點：左肩反彈高點 P1 與頭部反彈高點 P2 相連形成「頸線切線」。
    - 昨日收盤仍在切線之下，今日首度帶量長紅「破切站上切線」！
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
-4. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1) [全新新增]:
+4. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1):
    - 5 日線 (5MA)、10 日線 (10MA)、20 日線 (20MA) 極致糾結壓縮 (三線差幅 <= 2.0%)。
    - 今日帶量收實體紅 K，股價同時強勢站上 5MA、10MA、20MA，均線開始形成多頭向上發散！
-   - 支援與上述底型複合觸發 (例如「頭肩底破切 + 均線糾結突破」，高勝率雙重共振)。
+5. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1) [全新新增]:
+   - 強勢多頭格局：均線呈多頭架構 (20MA > 60MA 且股價站穩 20MA 月線)。
+   - 強勢淺回檔：前 1~3 天回檔跌破 5T 均線 (昨日收盤價 < 5MA)，但守穩在月線 20MA 之上。
+   - 今日重新站回 5T：今日收實體紅 K，收盤價首度重新站上 5T 線 (Close > 5MA)！
+   - 轉強買點：回檔洗盤結束、重啟多頭動能的絕佳右側切入點。
 
 【執行模式】
 - 預設模式 (極速推薦): python tw_stock_breakout_monitor.py
@@ -77,14 +81,17 @@ DEFAULT_CONFIG = {
     "line_user_id": "U5d37c903cbc9e6442aa86bde5e830125",
 
     # 技術面通用門檻
-    "vol_multiplier": 1.5,       # 突破日成交量需大於 5 日均量的 1.5 倍
+    "vol_multiplier": 1.5,       # 突破日成交量需大於 5 日均量的 1.5 倍 (型態1~4)
     "require_red_candle": True,  # 必須收實體紅 K (Close > Open)
     "require_above_ma20": True,  # 股價必須站上 20MA (月線)
     "require_above_ma60": True,  # 股價必須站上 60MA (季線)
     "min_volume_shares": 300,    # 每日最低成交張數 (過濾低於 300 張之冷門股)
 
     # 均線糾結參數設定
-    "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 最大與最小差幅門檻 (預設 2.0% 以內視為極致糾結)
+    "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 差幅門檻 (預設 2.0% 以內視為極致糾結)
+
+    # 「回後買上漲」特定參數
+    "reclaim_5ma_require_above_20ma": True, # 回檔跌破 5MA 時，低點必須守住 20MA (月線不破)
 
     # 各型態特定時間參數 (打底約 1 個月)
     "base_lookback_days": 28,    # 圓弧底與頭肩底打底觀察天數 (約 1 個月，20~30天)
@@ -202,7 +209,7 @@ def fetch_stock_daily_data(symbol: str, timeout_sec: float = 3.0) -> Optional[pd
 
 
 # =============================================================================
-# 核心模組 2：四大經典型態檢驗演算法
+# 核心模組 2：五大經典型態檢驗演算法
 # =============================================================================
 
 def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -337,7 +344,6 @@ def check_ma_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple
     threshold = config.get("ma_squeeze_threshold_pct", 2.0)
     is_squeezed = spread_pct <= threshold
 
-    # 突破確認：今日收盤價站上三條均線的高點，且收實體紅 K
     above_all_mas = float(today['Close']) > max_ma
 
     if is_squeezed and above_all_mas:
@@ -349,8 +355,44 @@ def check_ma_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple
     return False, {}
 
 
+def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """
+    型態 5：強勢股【回後買上漲】（均線多頭回檔跌破5T線，今日首度重新站上5T第一根）
+    1. 多頭架構：股價在月線 (20MA) 之上，且 20MA > 60MA (短中期多頭趨勢良好)。
+    2. 強勢回檔：昨日收盤價跌破 5MA，但守穩在月線 20MA 之上 (未被跌爛的良性洗盤)。
+    3. 今日重新站上：今日收盤價正式站回 5MA (Close > 5MA)！
+    4. 實體紅 K：收盤價 > 開盤價。
+    """
+    if len(df) < 65:
+        return False, {}
+
+    today = df.iloc[-1]
+    yesterday = df.iloc[-2]
+
+    # 1. 均線多頭架構 (20MA > 60MA 且收盤價站穩 20MA 月線)
+    uptrend_ok = (today['MA20'] > today['MA60']) and (today['Close'] > today['MA20'])
+
+    # 2. 昨日跌破 5MA，但維持在 20MA 之上 (強勢淺回檔，非翻空)
+    yesterday_under_5ma = yesterday['Close'] < yesterday['MA5']
+    yesterday_above_20ma = yesterday['Close'] >= yesterday['MA20'] if config.get("reclaim_5ma_require_above_20ma", True) else True
+
+    # 3. 今日重新站上 5MA 第一根
+    today_reclaim_5ma = today['Close'] > today['MA5']
+
+    # 4. 實體紅 K
+    is_red_candle = today['Close'] > today['Open']
+
+    if uptrend_ok and yesterday_under_5ma and yesterday_above_20ma and today_reclaim_5ma and is_red_candle:
+        return True, {
+            "name": "回後買上漲",
+            "key_price": round(float(today['MA5']), 2),
+            "detail": f"多頭強勢回檔守穩月線，今日紅K重返5T線({today['MA5']:.2f})展開反彈"
+        }
+    return False, {}
+
+
 def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
-    """綜合檢驗四大型態，並套用量價配合與均線濾網"""
+    """綜合檢驗五大型態，並套用量價配合與均線濾網"""
     df = df.copy()
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
@@ -381,7 +423,7 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     volume_shares = int(today['Volume'] / 1000)
     liquidity_ok = volume_shares >= config.get("min_volume_shares", 300)
 
-    # 4. 型態檢驗 (支援四大經典型態與複合觸發)
+    # 4. 型態檢驗 (支援五大經典型態與複合觸發)
     matched_patterns = []
     details = []
     key_prices = []
@@ -407,15 +449,27 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
         details.append(p3_info["detail"])
         key_prices.append(f"切線 {p3_info['key_price']}")
 
-    # 型態 4: 5/10/20MA 均線糾結突破 (新加入)
+    # 型態 4: 5/10/20MA 均線糾結突破
     p4_ok, p4_info = check_ma_squeeze_breakout(df, config)
     if p4_ok:
         matched_patterns.append("【均線糾結突破】")
         details.append(p4_info["detail"])
         key_prices.append(f"糾結頂 {p4_info['key_price']}")
 
+    # 型態 5: 強勢股【回後買上漲】(破5T後重新站回5T第一根)
+    p5_ok, p5_info = check_reclaim_5ma_breakout(df, config)
+    if p5_ok:
+        matched_patterns.append("【回後買上漲】")
+        details.append(p5_info["detail"])
+        key_prices.append(f"5T線 {p5_info['key_price']}")
+
     is_pattern_hit = len(matched_patterns) > 0
-    fully_qualified = is_pattern_hit and volume_price_ok and ma_ok and liquidity_ok
+
+    # 注意：若命中「回後買上漲」，只要量能大於昨日成交量 (量增紅K) 或符合基礎量比，均視為合格轉強
+    is_reclaim_special = ("【回後買上漲】" in matched_patterns) and is_red_candle and (today['Volume'] >= yesterday['Volume'])
+    is_volume_valid = volume_price_ok or is_reclaim_special
+
+    fully_qualified = is_pattern_hit and is_volume_valid and ma_ok and liquidity_ok
 
     return {
         "qualified": fully_qualified,
@@ -427,7 +481,7 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
         "matched_patterns": " + ".join(matched_patterns) if matched_patterns else "無型態",
         "key_prices": " / ".join(key_prices) if key_prices else "—",
         "pattern_details": "；".join(details) if details else "—",
-        "volume_price_ok": volume_price_ok,
+        "volume_price_ok": is_volume_valid,
         "ma_ok": ma_ok,
     }
 
@@ -504,7 +558,7 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
         ])
 
     print("\n" + "=" * 96)
-    print(f"  台股強勢底部突破掃描報告 (掃描總數: {len(results)} 檔 | 命中突破: {len(hits)} 檔)")
+    print(f"  台股強勢底部/轉強突破掃描報告 (掃描總數: {len(results)} 檔 | 命中突破: {len(hits)} 檔)")
     print("=" * 96)
     if HAS_TABULATE:
         print(tabulate(table_rows, headers=headers, tablefmt="fancy_grid"))
@@ -526,13 +580,13 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
         today_date = datetime.date.today().strftime("%Y/%m/%d")
         msg_lines = [
             f"🔥【台股型態突破精選】({today_date})",
-            f"共篩選出 {len(hits)} 檔「放量紅K + 站上月季線」強勢突破標的：",
+            f"共篩選出 {len(hits)} 檔「放量紅K + 站上關鍵均線」強勢突破標的：",
             "-----------------------------"
         ]
         for h in hits[:10]:
             msg_lines.append(
                 f"▶ {h['symbol']} {h.get('name', '')}\n"
-                f"  現價: {h['close']} ({h['change_pct']:+.2f}%) | 放量: {h['vol_ratio']}倍\n"
+                f"  現價: {h['close']} ({h['change_pct']:+.2f}%) | 量比: {h['vol_ratio']}倍\n"
                 f"  型態: {h['matched_patterns']}\n"
                 f"  價位: {h['key_prices']}\n"
                 f"  說明: {h['pattern_details']}\n"
@@ -571,14 +625,14 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
                 print(f"✗ [連線異常] {e}")
 
     elif not hits:
-        print("\n[通知] 今日掃描無符合四大強勢型態之標的，不發送推播干擾。")
+        print("\n[通知] 今日掃描無符合強勢型態之標的，不發送推播干擾。")
 
 
 # =============================================================================
 # CLI 命令列進入點
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="台股四大強勢突破型態全自動監控工具")
+    parser = argparse.ArgumentParser(description="台股五大強勢突破型態全自動監控工具")
     parser.add_argument("--market", choices=["top", "all", "custom"], default="top", 
                         help="掃描範圍: top (精選龍頭與熱門約220檔，預設最快), all (全台股1800+檔), custom (自選)")
     parser.add_argument("--stocks", nargs="+", help="指定自選代號 (如: 2330 2317 6274)")

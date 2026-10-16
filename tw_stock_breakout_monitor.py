@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「三大經典強勢突破型態」全自動全市場監控腳本
+台股「四大經典強勢突破型態」全自動極速監控腳本
 =============================================================================
-【三大突破型態演算法】
+【四大突破型態演算法】
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
    - 40 天波段高點後，至少回檔整理 3 天以上。
    - 昨日收盤價 < 前高，今日收盤價 > 前高 (首根站上)。
@@ -20,10 +20,16 @@
    - 兩次反彈高點：左肩反彈高點 P1 與頭部反彈高點 P2 相連形成「頸線切線」。
    - 昨日收盤仍在切線之下，今日首度帶量長紅「破切站上切線」！
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
+4. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1) [全新新增]:
+   - 5 日線 (5MA)、10 日線 (10MA)、20 日線 (20MA) 極致糾結壓縮 (三線差幅 <= 2.0%)。
+   - 今日帶量收實體紅 K，股價同時強勢站上 5MA、10MA、20MA，均線開始形成多頭向上發散！
+   - 支援與上述底型複合觸發 (例如「頭肩底破切 + 均線糾結突破」，高勝率雙重共振)。
 
-【官方帳號公開群發推播 (Broadcast)】
-- 支援 LINE 官方帳號「廣播訊息 API (Broadcast)」
-- 只要任何人加你的官方帳號為好友，盤後就會自動全員同步收到推播，完全不用查任何人的 User ID！
+【執行模式】
+- 預設模式 (極速推薦): python tw_stock_breakout_monitor.py
+  (自動多執行緒掃描台股前 220 大高流動性與熱門成長主力股)
+- 全市場大掃描:       python tw_stock_breakout_monitor.py --market all
+  (自動連線證交所名冊，掃描全台股 1,800+ 檔上市櫃普通股)
 =============================================================================
 """
 
@@ -66,9 +72,7 @@ DEFAULT_CONFIG = {
     # 你的專屬 LINE 官方帳號設定
     "line_channel_access_token": "9ipOm1j5q30aCiczxs4aVEWmOeGTvUa4UF4W6Tj0O3EKW7VUpqQQPrCUmoyzRpfFDWvqtjGKzjOPTI+W6gZQhXObM9nw+xvRPCZ+8tabcneFntw+VwRIqCKh6nBljUFIeA11il0D24qHH7NxQLK/TwdB04t89/1O/w1cDnyilFU=",
     
-    # 【公開廣播模式 (Broadcast)】:
-    # 設為 True 時，只要加你官方帳號為好友的所有人，都會同時收到公開推播！(無需填寫任何 user_id)
-    # 設為 False 時，僅會私訊給下方 line_user_id 指定的單一對象。
+    # 公開廣播模式 (Broadcast): 廣播給所有加好友的用戶
     "line_broadcast": True,
     "line_user_id": "U5d37c903cbc9e6442aa86bde5e830125",
 
@@ -79,12 +83,18 @@ DEFAULT_CONFIG = {
     "require_above_ma60": True,  # 股價必須站上 60MA (季線)
     "min_volume_shares": 300,    # 每日最低成交張數 (過濾低於 300 張之冷門股)
 
+    # 均線糾結參數設定
+    "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 最大與最小差幅門檻 (預設 2.0% 以內視為極致糾結)
+
     # 各型態特定時間參數 (打底約 1 個月)
     "base_lookback_days": 28,    # 圓弧底與頭肩底打底觀察天數 (約 1 個月，20~30天)
     "swing_high_window": 40,     # 回檔突破前高的回溯天數 (40天)
     "min_pullback_bars": 3,      # 前高回檔最少天數 (3天)
 
-    # 備用 Discord Webhook
+    # 超時防卡死參數
+    "ticker_timeout_sec": 3.0,   # 單檔行情抓取超時上限 (秒)
+    "max_scan_total_sec": 240,   # 全程掃描最長執行時間 (秒，預設 4 分鐘自動收尾)
+    
     "discord_webhook_url": "",
 }
 
@@ -124,20 +134,20 @@ CORE_TW_STOCKS = sorted(list(set(CORE_TW_STOCKS)))
 
 
 # =============================================================================
-# 核心模組 1：資料取得 (支援 yfinance 與 台灣證交所名冊)
+# 核心模組 1：資料取得 (支援超時保護)
 # =============================================================================
 def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
     """
-    從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃股票代號及名稱 (約 1,800+ 檔)
+    從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃股票代號及名稱
     """
-    print("[資料更新] 正在連線台灣證券交易所 (TWSE) 抓取全市場股票名冊...")
+    print("[資料更新] 正在連線台灣證券交易所 (TWSE) 抓取名冊...")
     all_stocks = []
     modes = [(2, "上市"), (4, "上櫃")]
     
     for mode_id, market_type in modes:
         url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode_id}"
         try:
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, timeout=8)
             resp.encoding = 'big5'
             if resp.status_code == 200:
                 matches = re.findall(r'(\d{4})[\s\u3000]+([^\s<"]+)', resp.text)
@@ -145,8 +155,8 @@ def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
                     if len(code) == 4 and code.isdigit() and not code.startswith("00"):
                         suffix = ".TW" if mode_id == 2 else ".TWO"
                         all_stocks.append((f"{code}{suffix}", f"{code} {name}"))
-        except Exception as e:
-            print(f"[警告] 抓取{market_type}名冊失敗: {e}")
+        except Exception:
+            continue
 
     unique_stocks = []
     seen = set()
@@ -155,13 +165,13 @@ def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
             seen.add(sym)
             unique_stocks.append((sym, label))
             
-    print(f"[名冊完成] 成功取得全市場有效普通股共 {len(unique_stocks)} 檔！")
+    print(f"[名冊完成] 取得有效普通股共 {len(unique_stocks)} 檔！")
     return unique_stocks
 
 
-def fetch_stock_daily_data(symbol: str) -> Optional[pd.DataFrame]:
+def fetch_stock_daily_data(symbol: str, timeout_sec: float = 3.0) -> Optional[pd.DataFrame]:
     """
-    抓取單檔股票日 K 線
+    抓取單檔股票日 K 線 (含嚴格超時防護)
     """
     if not HAS_YFINANCE:
         return None
@@ -176,8 +186,8 @@ def fetch_stock_daily_data(symbol: str) -> Optional[pd.DataFrame]:
     for ticker in candidates:
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="6mo")
-            if not hist.empty and len(hist) >= 40:
+            hist = stock.history(period="6mo", timeout=timeout_sec)
+            if not hist.empty and len(hist) >= 35:
                 df = hist
                 break
         except Exception:
@@ -192,7 +202,7 @@ def fetch_stock_daily_data(symbol: str) -> Optional[pd.DataFrame]:
 
 
 # =============================================================================
-# 核心模組 2：三大經典型態檢驗演算法
+# 核心模組 2：四大經典型態檢驗演算法
 # =============================================================================
 
 def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -221,7 +231,7 @@ def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[b
 
 
 def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 2：疑似圓弧底 (U型底) 突破第一根 (打底約 1 個月)"""
+    """型態 2：疑似圓弧底 (U型底) 突破第一根"""
     lookback = config["base_lookback_days"]
     if len(df) < lookback + 10:
         return False, {}
@@ -253,7 +263,7 @@ def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[boo
 
 
 def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 3：疑似頭肩底「破切」第一根 (兩反彈高點頸線切線)"""
+    """型態 3：疑似頭肩底「破切」第一根"""
     lookback = config["base_lookback_days"]
     if len(df) < lookback + 10:
         return False, {}
@@ -309,8 +319,38 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     return False, {}
 
 
+def check_ma_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """型態 4：5日、10日、20日均線極致糾結出量突破第一根"""
+    today = df.iloc[-1]
+    ma5 = today['MA5']
+    ma10 = today['MA10']
+    ma20 = today['MA20']
+
+    if pd.isnull(ma5) or pd.isnull(ma10) or pd.isnull(ma20) or ma20 == 0:
+        return False, {}
+
+    mas = [float(ma5), float(ma10), float(ma20)]
+    max_ma = max(mas)
+    min_ma = min(mas)
+    spread_pct = (max_ma - min_ma) / min_ma * 100.0
+
+    threshold = config.get("ma_squeeze_threshold_pct", 2.0)
+    is_squeezed = spread_pct <= threshold
+
+    # 突破確認：今日收盤價站上三條均線的高點，且收實體紅 K
+    above_all_mas = float(today['Close']) > max_ma
+
+    if is_squeezed and above_all_mas:
+        return True, {
+            "name": "均線糾結突破",
+            "key_price": round(float(max_ma), 2),
+            "detail": f"5/10/20MA極致糾結(差{spread_pct:.1f}%)，今日帶量發散站上"
+        }
+    return False, {}
+
+
 def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
-    """綜合檢驗三種型態，並套用量價配合與均線濾網"""
+    """綜合檢驗四大型態，並套用量價配合與均線濾網"""
     df = df.copy()
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
@@ -341,28 +381,38 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     volume_shares = int(today['Volume'] / 1000)
     liquidity_ok = volume_shares >= config.get("min_volume_shares", 300)
 
-    # 4. 型態檢驗
+    # 4. 型態檢驗 (支援四大經典型態與複合觸發)
     matched_patterns = []
     details = []
     key_prices = []
 
+    # 型態 1: 回檔突破前高
     p1_ok, p1_info = check_pullback_breakout(df, config)
     if p1_ok:
         matched_patterns.append("【回檔突破】")
         details.append(p1_info["detail"])
         key_prices.append(f"前高 {p1_info['key_price']}")
 
+    # 型態 2: 圓弧底突破
     p2_ok, p2_info = check_rounding_bottom(df, config)
     if p2_ok:
         matched_patterns.append("【圓弧底突破】")
         details.append(p2_info["detail"])
         key_prices.append(f"碗緣 {p2_info['key_price']}")
 
+    # 型態 3: 頭肩底破切
     p3_ok, p3_info = check_head_and_shoulders_bottom(df, config)
     if p3_ok:
         matched_patterns.append("【頭肩底破切】")
         details.append(p3_info["detail"])
         key_prices.append(f"切線 {p3_info['key_price']}")
+
+    # 型態 4: 5/10/20MA 均線糾結突破 (新加入)
+    p4_ok, p4_info = check_ma_squeeze_breakout(df, config)
+    if p4_ok:
+        matched_patterns.append("【均線糾結突破】")
+        details.append(p4_info["detail"])
+        key_prices.append(f"糾結頂 {p4_info['key_price']}")
 
     is_pattern_hit = len(matched_patterns) > 0
     fully_qualified = is_pattern_hit and volume_price_ok and ma_ok and liquidity_ok
@@ -383,7 +433,7 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
 
 
 # =============================================================================
-# 核心模組 3：多執行緒平行高速掃描
+# 核心模組 3：高並行高速掃描 (含超時收尾機制)
 # =============================================================================
 def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(item, tuple):
@@ -391,7 +441,8 @@ def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, A
     else:
         symbol, name = item, item
 
-    df = fetch_stock_daily_data(symbol)
+    timeout_sec = config.get("ticker_timeout_sec", 3.0)
+    df = fetch_stock_daily_data(symbol, timeout_sec=timeout_sec)
     if df is not None:
         res = evaluate_stock_patterns(df, config)
         res["symbol"] = symbol.replace(".TW", "").replace(".TWO", "")
@@ -400,10 +451,11 @@ def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, A
     return None
 
 
-def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max_workers: int = 8) -> List[Dict[str, Any]]:
-    print(f"\n[啟動掃描] 正以多執行緒 (Threads: {max_workers}) 掃描 {len(stock_candidates)} 檔標的...")
+def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max_workers: int = 14) -> List[Dict[str, Any]]:
+    print(f"\n[極速掃描啟動] 正以多執行緒 (Threads: {max_workers}) 掃描 {len(stock_candidates)} 檔標的...")
     results = []
     start_t = time.time()
+    max_total_sec = config.get("max_scan_total_sec", 240)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(scan_stock_worker, item, config): item for item in stock_candidates}
@@ -412,7 +464,7 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
         
         for future in as_completed(futures):
             done_count += 1
-            if done_count % 30 == 0 or done_count == total_count:
+            if done_count % 25 == 0 or done_count == total_count:
                 print(f"  > 掃描進度: {done_count}/{total_count} ({done_count/total_count*100:.1f}%) ...", end="\r")
             try:
                 res = future.result()
@@ -421,13 +473,17 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
             except Exception:
                 continue
 
+            if time.time() - start_t > max_total_sec:
+                print(f"\n[保護機制] 達到預設時間上限 ({max_total_sec}秒)，平滑收尾目前已完成的 {len(results)} 檔分析結果！")
+                break
+
     elapsed = time.time() - start_t
     print(f"\n[掃描完成] 耗時 {elapsed:.1f} 秒，成功分析 {len(results)} 檔標的！")
     return results
 
 
 # =============================================================================
-# 核心模組 4：報表輸出與 LINE 官方帳號公開廣播 (Broadcast)
+# 核心模組 4：報表輸出與 LINE 官方帳號公開廣播
 # =============================================================================
 def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, Any]):
     hits = [r for r in results if r["qualified"]]
@@ -457,13 +513,11 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             print(row)
     print("=" * 96)
 
-    # 匯出 CSV
     today_str = datetime.date.today().strftime("%Y%m%d")
     csv_file = f"tw_breakout_scan_{today_str}.csv"
     pd.DataFrame(results).to_csv(csv_file, index=False, encoding="utf-8-sig")
     print(f"[CSV 報告] 已匯出完整分析至: {csv_file}")
 
-    # LINE 官方帳號發送 (支援廣播 Broadcast 與 單人 Push)
     line_token = config.get("line_channel_access_token")
     is_broadcast = config.get("line_broadcast", True)
     line_uid = config.get("line_user_id")
@@ -490,7 +544,6 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             "Authorization": f"Bearer {line_token}"
         }
 
-        # 模式 A: 官方帳號公開群發廣播 (Broadcast) - 全員同步接收
         if is_broadcast:
             print("\n[LINE 官方帳號] 正在進行【全員公開廣播推播 (Broadcast)】...")
             url = "https://api.line.me/v2/bot/message/broadcast"
@@ -504,7 +557,6 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             except Exception as e:
                 print(f"✗ [連線異常] {e}")
 
-        # 模式 B: 私訊單一對象 (Push)
         elif line_uid:
             print("\n[LINE 私訊] 正在發送至指定 User ID...")
             url = "https://api.line.me/v2/bot/message/push"
@@ -519,18 +571,18 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
                 print(f"✗ [連線異常] {e}")
 
     elif not hits:
-        print("\n[通知] 今日掃描無符合三大型態之標的，不發送推播干擾。")
+        print("\n[通知] 今日掃描無符合四大強勢型態之標的，不發送推播干擾。")
 
 
 # =============================================================================
 # CLI 命令列進入點
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="台股三大強勢突破型態全自動監控工具")
+    parser = argparse.ArgumentParser(description="台股四大強勢突破型態全自動監控工具")
     parser.add_argument("--market", choices=["top", "all", "custom"], default="top", 
                         help="掃描範圍: top (精選龍頭與熱門約220檔，預設最快), all (全台股1800+檔), custom (自選)")
     parser.add_argument("--stocks", nargs="+", help="指定自選代號 (如: 2330 2317 6274)")
-    parser.add_argument("--threads", type=int, default=8, help="平行掃描執行緒數量 (預設: 8)")
+    parser.add_argument("--threads", type=int, default=14, help="平行掃描執行緒數量 (預設: 14)")
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG.copy()

@@ -145,26 +145,94 @@ CORE_TW_STOCKS = sorted(list(set(CORE_TW_STOCKS)))
 # =============================================================================
 # 核心模組 1：資料取得 (支援超時保護)
 # =============================================================================
+def is_strictly_common_stock(code: str, name: str) -> bool:
+    """
+    台股純普通股嚴格過濾器：
+    1. 代號格式：必須為嚴格 4 碼純數字 (完全排除 5 碼可轉債、6 碼權證、帶英文字母特別股)。
+    2. 排除非普通股代號：排除 00 開頭 (ETF)、01/02 開頭 (ETN)、91 開頭 (TDR)。
+    3. 排除可轉債 (CB)：名稱包含「債」、「CB」、「可轉」、「轉換公司債」。
+    4. 排除權證 (Warrants)：名稱包含「權證」、「認購」、「認售」、「牛證」、「熊證」、「展延」，或含「購/售/牛/熊」。
+    5. 排除特別股：名稱包含「特別股」、「甲特」、「乙特」、「丙特」、「丁特」、「戊特」，或名稱以「特」結尾 (排除「力特」等普通股除外)。
+    """
+    code = str(code).strip().upper()
+    name = str(name).strip()
+
+    # 1. 代號長度與格式：必須為嚴格 4 碼純數字
+    if not (len(code) == 4 and code.isdigit()):
+        return False
+
+    # 2. 排除 ETF (00 開頭)、ETN (01/02 開頭)、TDR (91 開頭)
+    if code.startswith(("00", "01", "02", "91")):
+        return False
+
+    # 3. 排除可轉債 (CB) 關鍵字
+    if any(kw in name for kw in ["債", "CB", "可轉", "轉換公司債", "公司債"]):
+        return False
+
+    # 4. 排除權證關鍵字 (認購權證、認售權證、牛熊證、展延權證)
+    if any(kw in name for kw in ["權證", "認購", "認售", "牛證", "熊證", "展延", "購", "售", "牛", "熊"]):
+        return False
+
+    # 5. 排除特別股關鍵字 (保留「力特」、「特力」等普通股，僅排除真正的特別股)
+    if any(kw in name for kw in ["特別股", "甲特", "乙特", "丙特", "丁特", "戊特"]):
+        return False
+    if name.endswith("特") and name not in ["力特"]:
+        return False
+
+    return True
+
+
 def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
     """
-    從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃股票代號及名稱
+    從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃股票代號及名稱。
+    【多層防護機制】：
+    1. 分區過濾：精確定位 HTML 表格中的「股票」區段，略過「特別股」、「可轉換公司債」、「認購(售)權證」等。
+    2. 正則邊界：使用前後邊界 (?<![0-9a-zA-Z])\d{4}(?![0-9a-zA-Z])，防止 5 碼可轉債或 6 碼權證被誤截後 4 碼。
+    3. 語意過濾：調用 is_strictly_common_stock()，徹底杜絕可轉債、權證、特別股。
     """
-    print("[資料更新] 正在連線台灣證券交易所 (TWSE) 抓取名冊...")
+    print("[資料更新] 正在連線台灣證券交易所 (TWSE) 抓取名冊 (啟用普通股嚴格過濾)... ")
     all_stocks = []
     modes = [(2, "上市"), (4, "上櫃")]
     
     for mode_id, market_type in modes:
         url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode_id}"
         try:
-            resp = requests.get(url, timeout=8)
+            resp = requests.get(url, timeout=10)
             resp.encoding = 'big5'
             if resp.status_code == 200:
-                matches = re.findall(r'(\d{4})[\s\u3000]+([^\s<"]+)', resp.text)
-                for code, name in matches:
-                    if len(code) == 4 and code.isdigit() and not code.startswith("00"):
-                        suffix = ".TW" if mode_id == 2 else ".TWO"
-                        all_stocks.append((f"{code}{suffix}", f"{code} {name}"))
-        except Exception:
+                html_text = resp.text
+                in_stock_section = False
+                found_in_section = 0
+                rows = re.split(r"<tr[^>]*>", html_text, flags=re.IGNORECASE)
+                
+                for row in rows:
+                    b_match = re.search(r"<b[^>]*>([^<]+)</b>", row, re.IGNORECASE)
+                    if b_match:
+                        sec_title = b_match.group(1).strip()
+                        if sec_title == "股票":
+                            in_stock_section = True
+                        else:
+                            in_stock_section = False
+                            
+                    if in_stock_section:
+                        cell_match = re.search(r">\s*(?<![0-9a-zA-Z])(\d{4})(?![0-9a-zA-Z])[\s　]+([^<]+?)\s*<", row)
+                        if cell_match:
+                            code = cell_match.group(1).strip()
+                            name = cell_match.group(2).strip()
+                            if is_strictly_common_stock(code, name):
+                                suffix = ".TW" if mode_id == 2 else ".TWO"
+                                all_stocks.append((f"{code}{suffix}", f"{code} {name}"))
+                                found_in_section += 1
+
+                # 備用保險機制 (若分區標籤異常，使用嚴格邊界與 is_strictly_common_stock 雙重檢核)
+                if found_in_section == 0:
+                    matches = re.findall(r"(?<![0-9a-zA-Z])(\d{4})(?![0-9a-zA-Z])[\s\u3000]+([^\s<\"\'\r\n]+)", html_text)
+                    for code, name in matches:
+                        if is_strictly_common_stock(code, name):
+                            suffix = ".TW" if mode_id == 2 else ".TWO"
+                            all_stocks.append((f"{code}{suffix}", f"{code} {name}"))
+        except Exception as e:
+            print(f"[名冊警告] {market_type} 抓取發生例外: {e}")
             continue
 
     unique_stocks = []
@@ -174,7 +242,7 @@ def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
             seen.add(sym)
             unique_stocks.append((sym, label))
             
-    print(f"[名冊完成] 取得有效普通股共 {len(unique_stocks)} 檔！")
+    print(f"[名冊完成] 成功取得純普通股共 {len(unique_stocks)} 檔 (已完整過濾可轉債與權證)！")
     return unique_stocks
 
 
@@ -488,6 +556,11 @@ def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, A
     else:
         symbol, name = item, item
 
+    # 嚴格防護過濾：確認代號與名稱為純普通股 (排除可轉債、權證、特別股)
+    clean_code = re.sub(r"\.(TW|TWO)$", "", str(symbol).strip().upper())
+    if not is_strictly_common_stock(clean_code, str(name)):
+        return None
+
     timeout_sec = config.get("ticker_timeout_sec", 3.0)
     df = fetch_stock_daily_data(symbol, timeout_sec=timeout_sec)
     if df is not None:
@@ -677,7 +750,7 @@ def main():
     config = DEFAULT_CONFIG.copy()
 
     if args.stocks:
-        candidates = [(s, s) for s in args.stocks]
+        candidates = [(s, s) for s in args.stocks if is_strictly_common_stock(re.sub(r"\.(TW|TWO)$", "", s), s)]
     elif args.market == "all":
         candidates = fetch_all_market_stock_codes()
     else:

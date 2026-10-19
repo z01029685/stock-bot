@@ -92,8 +92,10 @@ DEFAULT_CONFIG = {
     "reclaim_5ma_min_gain_pct": 1.5,    # 今日站回 5T 之紅 K 漲幅至少 1.5% 以上
     "reclaim_5ma_vol_ratio": 1.2,       # 今日成交量至少為 5MA 均量的 1.2 倍
 
-    # 各型態特定時間參數 (打底約 1 個月)
-    "base_lookback_days": 28,    # 圓弧底與頭肩底打底觀察天數 (約 1 個月，20~30天)
+    # 各型態特定時間參數 (支援 20 ~ 50 天自適應打底掃描，精準相容 1~2.5 個月圓弧底)
+    "min_base_lookback_days": 20, # 最小打底觀察天數 (約 1 個月)
+    "max_base_lookback_days": 48, # 最大打底觀察天數 (約 2.5 個月，如 6277 宏正 40 天打底)
+    "base_lookback_days": 28,    # 基準打底觀察天數
     "swing_high_window": 40,     # 回檔突破前高的回溯天數 (40天)
     "min_pullback_bars": 3,      # 前高回檔最少天數 (3天)
 
@@ -308,40 +310,77 @@ def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[b
 
 
 def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 2：疑似圓弧底 (U型底) 突破第一根"""
-    lookback = config["base_lookback_days"]
-    if len(df) < lookback + 10:
+    """
+    型態 2：疑似圓弧底 (U型底/碗公底) 突破第一根
+    【動態自適應打底掃描】：
+    不再寫死單一固定天數，而是自動在 20 ~ 48 天 (約 1~2.5 個月) 的打底區間中，
+    尋找最對稱、最圓潤且深度達標 (>= 4%) 的碗公底 (完美支援如 6277 宏正整理 40 天之圓弧底)。
+    """
+    min_lookback = config.get("min_base_lookback_days", 20)
+    max_lookback = config.get("max_base_lookback_days", 48)
+
+    if len(df) < min_lookback + 10:
         return False, {}
 
-    sub_df = df.iloc[-(lookback + 2) : -1]
     today = df.iloc[-1]
     yesterday = df.iloc[-2]
 
-    left_part = sub_df.iloc[: int(len(sub_df) * 0.35)]
-    mid_part = sub_df.iloc[int(len(sub_df) * 0.2) : int(len(sub_df) * 0.8)]
+    best_match = None
+    best_score = -1.0
 
-    left_high = left_part['High'].max()
-    mid_low = mid_part['Low'].min()
+    # 針對 20 ~ 48 天的多個打底週期進行自適應評估
+    for lookback in range(min_lookback, min(len(df) - 5, max_lookback + 1)):
+        sub_df = df.iloc[-(lookback + 2) : -1]
+        n = len(sub_df)
+        if n < min_lookback:
+            continue
 
-    bowl_depth = (left_high - mid_low) / left_high * 100
-    if bowl_depth < 4.0:
-        return False, {}
+        # 左碗緣：觀察視窗前 30% 區間的最高點
+        left_len = max(3, int(n * 0.30))
+        left_part = sub_df.iloc[:left_len]
+        left_high = float(left_part['High'].max())
 
-    neckline = left_high
-    is_first_break = yesterday['Close'] < neckline and today['Close'] > neckline
+        # 碗底：整個打底視窗內的最低點
+        min_low = float(sub_df['Low'].min())
+        min_low_rel_idx = int(sub_df['Low'].values.argmin())
 
-    if is_first_break:
-        return True, {
-            "name": "圓弧底突破",
-            "key_price": round(float(neckline), 2),
-            "detail": f"打底{lookback}天(深{bowl_depth:.1f}%)首度越過碗緣"
-        }
+        # 碗底必須落在中間 20% ~ 80% 的合理腹地 (避免單邊暴跌或暴漲)
+        if not (int(n * 0.20) <= min_low_rel_idx <= int(n * 0.80)):
+            continue
+
+        # 碗深深度門檻 (>= 4.0%)
+        bowl_depth = (left_high - min_low) / left_high * 100.0
+        if bowl_depth < 4.0:
+            continue
+
+        # 確認左碗緣為前期具代表性的波段高點 (不能低於左半側其他高點)
+        if left_high < float(sub_df['High'].iloc[:min_low_rel_idx].max()) * 0.98:
+            continue
+
+        neckline = left_high
+        # 突破第一根條件：昨日收盤價仍在碗緣之下 (或微貼碗緣 <= 0.8%)，今日收盤價長紅首度越過碗緣！
+        is_first_break = (float(yesterday['Close']) <= neckline * 1.008) and (float(today['Close']) > neckline)
+
+        if is_first_break:
+            # 以對稱性與打底深度的綜合評分選出最佳碗型
+            symmetry = 1.0 - abs((n / 2.0) - min_low_rel_idx) / (n / 2.0)
+            score = bowl_depth * (1.0 + symmetry)
+            if score > best_score:
+                best_score = score
+                best_match = (True, {
+                    "name": "圓弧底突破",
+                    "key_price": round(float(neckline), 2),
+                    "detail": f"打底{lookback}天(深{bowl_depth:.1f}%)首度越過碗緣"
+                })
+
+    if best_match:
+        return best_match
     return False, {}
 
 
 def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 3：疑似頭肩底「破切」第一根"""
-    lookback = config["base_lookback_days"]
+    """型態 3：疑似頭肩底「破切」第一根 (嚴格三波谷架構，避免與平滑圓弧底混淆)"""
+    lookback = config.get("base_lookback_days", 28)
     if len(df) < lookback + 10:
         return False, {}
 
@@ -351,9 +390,9 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     n = len(sub_df)
 
     head_rel_idx = sub_df['Low'].values.argmin()
-    head_price = sub_df['Low'].iloc[head_rel_idx]
+    head_price = float(sub_df['Low'].iloc[head_rel_idx])
 
-    if head_rel_idx < int(n * 0.2) or head_rel_idx > int(n * 0.75):
+    if head_rel_idx < int(n * 0.22) or head_rel_idx > int(n * 0.72):
         return False, {}
 
     left_sub = sub_df.iloc[:head_rel_idx]
@@ -363,15 +402,16 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
         return False, {}
 
     p1_rel_idx = left_sub['High'].values.argmax()
-    p1_price = left_sub['High'].iloc[p1_rel_idx]
-    l1_price = left_sub['Low'].iloc[: max(1, p1_rel_idx + 1)].min()
+    p1_price = float(left_sub['High'].iloc[p1_rel_idx])
+    l1_price = float(left_sub['Low'].iloc[: max(1, p1_rel_idx + 1)].min())
 
     p2_rel_idx = right_sub['High'].values.argmax()
-    p2_price = right_sub['High'].iloc[p2_rel_idx]
+    p2_price = float(right_sub['High'].iloc[p2_rel_idx])
     p2_global_idx = head_rel_idx + 1 + p2_rel_idx
-    l2_price = right_sub['Low'].min()
+    l2_price = float(right_sub['Low'].min())
 
-    if head_price >= l1_price or head_price >= l2_price:
+    # 頭肩底實質檢驗：頭部深度必須比左肩和右肩更深 (至少 1.5% 以上)，避免把圓弧底碗底小波折誤判為頭部
+    if head_price >= l1_price * 0.985 or head_price >= l2_price * 0.985:
         return False, {}
     if l2_price <= head_price:
         return False, {}
@@ -385,7 +425,7 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     neckline_yest = p1_price + slope * ((n - 1) - x1)
     neckline_today = p1_price + slope * (n - x1)
 
-    is_broke_cut = yesterday['Close'] < neckline_yest and today['Close'] > neckline_today
+    is_broke_cut = float(yesterday['Close']) < neckline_yest and float(today['Close']) > neckline_today
 
     if is_broke_cut:
         return True, {
@@ -492,23 +532,23 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     details = []
     key_prices = []
 
-    # 型態 1: 回檔突破前高
-    p1_ok, p1_info = check_pullback_breakout(df, config)
-    if p1_ok:
-        matched_patterns.append("【回檔突破】")
-        details.append(p1_info["detail"])
-        key_prices.append(f"前高 {p1_info['key_price']}")
-
-    # 型態 2: 圓弧底突破
+    # 型態 2: 圓弧底突破 (優先評估底部型態，支援 20~48 天大中小碗底)
     p2_ok, p2_info = check_rounding_bottom(df, config)
     if p2_ok:
         matched_patterns.append("【圓弧底突破】")
         details.append(p2_info["detail"])
         key_prices.append(f"碗緣 {p2_info['key_price']}")
 
-    # 型態 3: 頭肩底破切
+    # 型態 1: 回檔突破前高 (若同時為圓弧底，代表亦創波段前高)
+    p1_ok, p1_info = check_pullback_breakout(df, config)
+    if p1_ok:
+        matched_patterns.append("【回檔突破】")
+        details.append(p1_info["detail"])
+        key_prices.append(f"前高 {p1_info['key_price']}")
+
+    # 型態 3: 頭肩底破切 (若已是標準圓弧底，則不重複或誤判為頭肩底)
     p3_ok, p3_info = check_head_and_shoulders_bottom(df, config)
-    if p3_ok:
+    if p3_ok and not p2_ok:
         matched_patterns.append("【頭肩底破切】")
         details.append(p3_info["detail"])
         key_prices.append(f"切線 {p3_info['key_price']}")

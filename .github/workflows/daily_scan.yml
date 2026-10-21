@@ -1,9 +1,7 @@
 name: Taiwan Stock Daily Breakout Scan
 
 on:
-  schedule:
-    - cron: '5 6 * * 1-5'
-  workflow_dispatch:
+  workflow_dispatch: # 僅由外部 trigger (cron-job.org) 於每日 14:00 觸發，已移除 schedule 徹底杜絕晚上重複執行！
 
 jobs:
   scan:
@@ -23,4 +21,4 @@ jobs:
 
       - name: Run Stock Breakout Scan
         run: |
-          python tw_stock_breakout_monitor.py --market all
+          python tw_stock_breakout_monitor.py

@@ -95,7 +95,7 @@ DEFAULT_CONFIG = {
     # 各型態特定時間參數 (依用戶需求精準錨定 40 天波段大底，當日漲幅不設限，以 6277 宏正為唯一黃金標準)
     "min_base_lookback_days": 35, # 最小打底觀察天數 (精準錨定 40 天波段，35~52天，排除 28 天以內之過短整理如 3305)
     "max_base_lookback_days": 52, # 最大打底觀察天數 (約 2.5 個月，完美鎖定 6277 宏正 40 天大底)
-    "min_bowl_depth_pct": 10.0,   # 圓弧底最低深度門檻 (10.0%，以 6277 深 14.8% 為標準，排除 3027 盛達 8.4%)
+    "min_bowl_depth_pct": 11.0,   # 圓弧底最低深度門檻 (提高至 11.0%，以 6277 深 14.8% 為標準，徹底排除 2207 深 7.7% 與 2353 深 5.3%)
     "max_rounding_right_pullback_pct": 3.8, # 右碗壁最大容許二次回檔幅度 (3.8%，排除如 3305 右側短期二次回檔破壞圓弧形態)
     "max_upper_shadow_pct": 50.0, # 上影線佔振幅最高上限 (50.0%，漲停直接放行，排除如 3305 留 82% 爆量長上影滯漲)
     "base_lookback_days": 40,    # 基準打底觀察天數 (以 40 天為最佳核心)
@@ -321,9 +321,9 @@ def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[boo
     3. 中間腹地下凹：中間 50% 均價必須實質低於左碗緣至少 4.5%，確保為真深凹碗底而非箱型震盪。
     4. 均線糾結互斥：若短期三線極致糾結 (差幅 <= 1.8%) 且深度小於 13%，歸類為【均線糾結突破】，不誤判為圓弧底。
     """
-    min_lookback = config.get("min_base_lookback_days", 20)
-    max_lookback = config.get("max_base_lookback_days", 48)
-    min_depth = config.get("min_bowl_depth_pct", 10.0)
+    min_lookback = config.get("min_base_lookback_days", 35)
+    max_lookback = config.get("max_base_lookback_days", 52)
+    min_depth = config.get("min_bowl_depth_pct", 11.0)
 
     if len(df) < min_lookback + 10:
         return False, {}
@@ -389,6 +389,12 @@ def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[boo
             max_allowed_pullback = config.get("max_rounding_right_pullback_pct", 3.8)
             if max_pullback_pct > max_allowed_pullback:
                 continue
+
+        # 6. 碗身天花板嚴格檢驗：左碗緣頸線必須是整段打底期間 (至昨日為止) 的最高天花板
+        # 碗內 (從左碗緣後至昨日) 所有收盤價絕不能曾高於頸線！若曾收過頸線，代表為水平箱型上下刷洗 (如 2207 和泰車 5 天前早已收過 550)，絕非首度突破！
+        bowl_body = sub_df.iloc[left_len : -1]
+        if len(bowl_body) > 0 and float(bowl_body['Close'].max()) >= left_high * 0.998:
+            continue
 
         neckline = left_high
         # 突破第一根條件校準 (依用戶指定：整理40天最好，當日漲幅不設限、漲停放行，但嚴格排除長上影倒貨與第2根追高)：

@@ -2,18 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「五大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
+台股「四大經典強勢起漲型態」全自動極速監控腳本 (已移除高誤判圓弧底，回歸純粹實戰) (全標的完整推播版)
 =============================================================================
 【五大起漲型態演算法】
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
    - 40 天波段高點後，至少回檔整理 3 天以上。
    - 昨日收盤價 < 前高，今日收盤價 > 前高 (首根站上)。
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
-2. 【疑似圓弧底突破第一根】 (Rounding Bottom Breakout Bar 1):
-   - 打底時間約 1 個月 (20~30 個交易日)，形成圓弧狀凹底。
-   - 碗底深度 >= 4%，均線走平翻揚。
-   - 昨日收盤價仍在碗緣頸線之下，今日出量長紅首度站上頸線。
-   - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
+2. 【已完全停用/移除圓弧底】：
+   - 依用戶指示與實戰檢驗，台股多數個股本質為「多頭波段回檔整理突破」，極少真圓弧底。
+   - 為徹底杜絕雜訊與誤判，已全面關閉圓弧底判定，原個股（如 3545、2207 等）直接回歸【回檔突破前高】！
 3. 【疑似頭肩底「破切」第一根】 (Head & Shoulders Bottom Breakout of Neckline):
    - 打底時間約 1 個月 (20~30 個交易日)。
    - 完整三底架構：左肩 L1、頭部最低點 Head、右肩低點 L2 (右肩明顯高於頭部，不破底)。
@@ -85,6 +83,7 @@ DEFAULT_CONFIG = {
     "min_volume_shares": 500,    # 每日最低成交張數 (500 張)
 
     # 均線糾結參數設定
+    "enable_rounding_bottom": False, # 已完全關閉圓弧底條件 (徹底杜絕誤判，讓3545/2207等回歸「回檔突破」)
     "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 差幅門檻 (2.0% 以內視為極致糾結)
 
     # 「回後買上漲」精準過濾參數
@@ -587,12 +586,14 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     details = []
     key_prices = []
 
-    # 型態 2: 圓弧底突破 (優先評估底部型態，支援 20~48 天大中小碗底)
-    p2_ok, p2_info = check_rounding_bottom(df, config)
-    if p2_ok:
-        matched_patterns.append("【圓弧底突破】")
-        details.append(p2_info["detail"])
-        key_prices.append(f"碗緣 {p2_info['key_price']}")
+    # 型態 2: 圓弧底突破 (依指示已完全關閉，回歸回檔突破，杜絕誤判)
+    p2_ok = False
+    if config.get("enable_rounding_bottom", False):
+        p2_ok, p2_info = check_rounding_bottom(df, config)
+        if p2_ok:
+            matched_patterns.append("【圓弧底突破】")
+            details.append(p2_info["detail"])
+            key_prices.append(f"碗緣 {p2_info['key_price']}")
 
     # 型態 1: 回檔突破前高 (若同時為圓弧底，代表亦創波段前高)
     p1_ok, p1_info = check_pullback_breakout(df, config)

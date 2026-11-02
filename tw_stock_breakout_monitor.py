@@ -2,31 +2,26 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「五大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
+台股「四大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
 =============================================================================
-【五大起漲型態演算法】
+【四大起漲型態演算法】（已徹底移除易誤判之圓弧底，回歸純粹實戰）
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
    - 40 天波段高點後，至少回檔整理 3 天以上。
    - 昨日收盤價 < 前高，今日收盤價 > 前高 (首根站上)。
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
-2. 【疑似圓弧底突破第一根】 (Rounding Bottom Breakout Bar 1):
-   - 打底時間約 1 個月 (20~30 個交易日)，形成圓弧狀凹底。
-   - 碗底深度 >= 4%，均線走平翻揚。
-   - 昨日收盤價仍在碗緣頸線之下，今日出量長紅首度站上頸線。
-   - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
-3. 【疑似頭肩底「破切」第一根】 (Head & Shoulders Bottom Breakout of Neckline):
-   - 打底時間約 1 個月 (20~30 個交易日)。
+2. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1):
+   - 5 日線 (5MA)、10 日線 (10MA)、20 日線 (20MA) 極致糾結壓縮 (三線差幅 <= 2.0%)。
+   - 今日帶量收實體紅 K，股價同時強勢站上 5MA、10MA、20MA，均線開始形成多頭向上發散！
+3. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1):
+   - 強勢多頭格局：20MA > 60MA 且股價站穩 20MA 月線。
+   - 強勢短洗盤：前 1~3 天回檔跌破 5T 均線 (昨日收盤價 < 5MA)，但守穩在月線 20MA 之上。
+   - 今日重新站回 5T：今日收實體紅 K (漲幅>=1.5%)，收盤價首度重新站上 5T 線！
+4. 【疑似頭肩底「破切」第一根】 (Head & Shoulders Bottom Breakout of Neckline):
+   - 打底時間約 1 個月 (28 個交易日)。
    - 完整三底架構：左肩 L1、頭部最低點 Head、右肩低點 L2 (右肩明顯高於頭部，不破底)。
    - 兩次反彈高點：左肩反彈高點 P1 與頭部反彈高點 P2 相連形成「頸線切線」。
    - 昨日收盤仍在切線之下，今日首度帶量長紅「破切站上切線」！
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
-4. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1):
-   - 5 日線 (5MA)、10 日線 (10MA)、20 日線 (20MA) 極致糾結壓縮 (三線差幅 <= 2.0%)。
-   - 今日帶量收實體紅 K，股價同時強勢站上 5MA、10MA、20MA，均線開始形成多頭向上發散！
-5. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1):
-   - 強勢多頭格局：20MA > 60MA 且股價站穩 20MA 月線。
-   - 強勢短洗盤：前 1~3 天回檔跌破 5T 均線 (昨日收盤價 < 5MA)，但守穩在月線 20MA 之上。
-   - 今日重新站回 5T：今日收實體紅 K (漲幅>=1.5%)，收盤價首度重新站上 5T 線！
 
 【完整全名單推播 (無截斷)】
 - 不再限制只推送前幾檔！只要符合條件的股票「全部完整列出」。
@@ -92,10 +87,8 @@ DEFAULT_CONFIG = {
     "reclaim_5ma_min_gain_pct": 1.5,    # 今日站回 5T 之紅 K 漲幅至少 1.5% 以上
     "reclaim_5ma_vol_ratio": 1.2,       # 今日成交量至少為 5MA 均量的 1.2 倍
 
-    # 各型態特定時間參數 (支援 20 ~ 50 天自適應打底掃描，精準相容 1~2.5 個月圓弧底)
-    "min_base_lookback_days": 20, # 最小打底觀察天數 (約 1 個月)
-    "max_base_lookback_days": 48, # 最大打底觀察天數 (約 2.5 個月，如 6277 宏正 40 天打底)
-    "base_lookback_days": 28,    # 基準打底觀察天數
+    # 波段與底部形態參數
+    "base_lookback_days": 28,    # 頭肩底打底觀察天數 (約 1 個月)
     "swing_high_window": 40,     # 回檔突破前高的回溯天數 (40天)
     "min_pullback_bars": 3,      # 前高回檔最少天數 (3天)
 
@@ -309,77 +302,8 @@ def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[b
     return False, {}
 
 
-def check_rounding_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """
-    型態 2：疑似圓弧底 (U型底/碗公底) 突破第一根
-    【動態自適應打底掃描】：
-    不再寫死單一固定天數，而是自動在 20 ~ 48 天 (約 1~2.5 個月) 的打底區間中，
-    尋找最對稱、最圓潤且深度達標 (>= 4%) 的碗公底 (完美支援如 6277 宏正整理 40 天之圓弧底)。
-    """
-    min_lookback = config.get("min_base_lookback_days", 20)
-    max_lookback = config.get("max_base_lookback_days", 48)
-
-    if len(df) < min_lookback + 10:
-        return False, {}
-
-    today = df.iloc[-1]
-    yesterday = df.iloc[-2]
-
-    best_match = None
-    best_score = -1.0
-
-    # 針對 20 ~ 48 天的多個打底週期進行自適應評估
-    for lookback in range(min_lookback, min(len(df) - 5, max_lookback + 1)):
-        sub_df = df.iloc[-(lookback + 2) : -1]
-        n = len(sub_df)
-        if n < min_lookback:
-            continue
-
-        # 左碗緣：觀察視窗前 30% 區間的最高點
-        left_len = max(3, int(n * 0.30))
-        left_part = sub_df.iloc[:left_len]
-        left_high = float(left_part['High'].max())
-
-        # 碗底：整個打底視窗內的最低點
-        min_low = float(sub_df['Low'].min())
-        min_low_rel_idx = int(sub_df['Low'].values.argmin())
-
-        # 碗底必須落在中間 20% ~ 80% 的合理腹地 (避免單邊暴跌或暴漲)
-        if not (int(n * 0.20) <= min_low_rel_idx <= int(n * 0.80)):
-            continue
-
-        # 碗深深度門檻 (>= 4.0%)
-        bowl_depth = (left_high - min_low) / left_high * 100.0
-        if bowl_depth < 4.0:
-            continue
-
-        # 確認左碗緣為前期具代表性的波段高點 (不能低於左半側其他高點)
-        if left_high < float(sub_df['High'].iloc[:min_low_rel_idx].max()) * 0.98:
-            continue
-
-        neckline = left_high
-        # 突破第一根條件：昨日收盤價仍在碗緣之下 (或微貼碗緣 <= 0.8%)，今日收盤價長紅首度越過碗緣！
-        is_first_break = (float(yesterday['Close']) <= neckline * 1.008) and (float(today['Close']) > neckline)
-
-        if is_first_break:
-            # 以對稱性與打底深度的綜合評分選出最佳碗型
-            symmetry = 1.0 - abs((n / 2.0) - min_low_rel_idx) / (n / 2.0)
-            score = bowl_depth * (1.0 + symmetry)
-            if score > best_score:
-                best_score = score
-                best_match = (True, {
-                    "name": "圓弧底突破",
-                    "key_price": round(float(neckline), 2),
-                    "detail": f"打底{lookback}天(深{bowl_depth:.1f}%)首度越過碗緣"
-                })
-
-    if best_match:
-        return best_match
-    return False, {}
-
-
 def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 3：疑似頭肩底「破切」第一根 (嚴格三波谷架構，避免與平滑圓弧底混淆)"""
+    """型態 3：疑似頭肩底「破切」第一根 (嚴格三波谷架構)"""
     lookback = config.get("base_lookback_days", 28)
     if len(df) < lookback + 10:
         return False, {}
@@ -410,7 +334,7 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     p2_global_idx = head_rel_idx + 1 + p2_rel_idx
     l2_price = float(right_sub['Low'].min())
 
-    # 頭肩底實質檢驗：頭部深度必須比左肩和右肩更深 (至少 1.5% 以上)，避免把圓弧底碗底小波折誤判為頭部
+    # 頭肩底實質檢驗：頭部深度必須比左肩和右肩更深 (至少 1.5% 以上)
     if head_price >= l1_price * 0.985 or head_price >= l2_price * 0.985:
         return False, {}
     if l2_price <= head_price:
@@ -532,40 +456,33 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     details = []
     key_prices = []
 
-    # 型態 2: 圓弧底突破 (優先評估底部型態，支援 20~48 天大中小碗底)
-    p2_ok, p2_info = check_rounding_bottom(df, config)
-    if p2_ok:
-        matched_patterns.append("【圓弧底突破】")
-        details.append(p2_info["detail"])
-        key_prices.append(f"碗緣 {p2_info['key_price']}")
-
-    # 型態 1: 回檔突破前高 (若同時為圓弧底，代表亦創波段前高)
+    # 型態 1: 回檔突破前高 (波段整理後首根突破)
     p1_ok, p1_info = check_pullback_breakout(df, config)
     if p1_ok:
         matched_patterns.append("【回檔突破】")
         details.append(p1_info["detail"])
         key_prices.append(f"前高 {p1_info['key_price']}")
 
-    # 型態 3: 頭肩底破切 (若已是標準圓弧底，則不重複或誤判為頭肩底)
-    p3_ok, p3_info = check_head_and_shoulders_bottom(df, config)
-    if p3_ok and not p2_ok:
-        matched_patterns.append("【頭肩底破切】")
-        details.append(p3_info["detail"])
-        key_prices.append(f"切線 {p3_info['key_price']}")
-
-    # 型態 4: 5/10/20MA 均線糾結突破
-    p4_ok, p4_info = check_ma_squeeze_breakout(df, config)
-    if p4_ok:
+    # 型態 2: 5/10/20MA 均線糾結突破 (極致壓縮帶量發散)
+    p2_ok, p2_info = check_ma_squeeze_breakout(df, config)
+    if p2_ok:
         matched_patterns.append("【均線糾結突破】")
-        details.append(p4_info["detail"])
-        key_prices.append(f"糾結頂 {p4_info['key_price']}")
+        details.append(p2_info["detail"])
+        key_prices.append(f"糾結頂 {p2_info['key_price']}")
 
-    # 型態 5: 強勢股【回後買上漲】
-    p5_ok, p5_info = check_reclaim_5ma_breakout(df, config)
-    if p5_ok:
+    # 型態 3: 強勢股【回後買上漲】(守穩月線重返5T)
+    p3_ok, p3_info = check_reclaim_5ma_breakout(df, config)
+    if p3_ok:
         matched_patterns.append("【回後買上漲】")
-        details.append(p5_info["detail"])
-        key_prices.append(f"5T線 {p5_info['key_price']}")
+        details.append(p3_info["detail"])
+        key_prices.append(f"5T線 {p3_info['key_price']}")
+
+    # 型態 4: 疑似頭肩底「破切」第一根
+    p4_ok, p4_info = check_head_and_shoulders_bottom(df, config)
+    if p4_ok:
+        matched_patterns.append("【頭肩底破切】")
+        details.append(p4_info["detail"])
+        key_prices.append(f"切線 {p4_info['key_price']}")
 
     is_pattern_hit = len(matched_patterns) > 0
     is_volume_valid = standard_volume_price_ok or ("【回後買上漲】" in matched_patterns)
@@ -605,7 +522,7 @@ def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, A
     df = fetch_stock_daily_data(symbol, timeout_sec=timeout_sec)
     if df is not None:
         res = evaluate_stock_patterns(df, config)
-        res["symbol"] = symbol.replace(".TW", "").replace(".TWO", "")
+        res["symbol"] = re.sub(r"\.(TW|TWO)$", "", str(symbol).strip().upper())
         res["name"] = name
         return res
     return None

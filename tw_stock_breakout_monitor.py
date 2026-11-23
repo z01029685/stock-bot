@@ -2,26 +2,30 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「四大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
+台股「五大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
 =============================================================================
-【四大起漲型態演算法】（已徹底移除易誤判之圓弧底，回歸純粹實戰）
+【五大起漲型態演算法】（已移除圓弧底與均線糾結，精煉保留實戰五大強勢型態）
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
    - 40 天波段高點後，至少回檔整理 3 天以上。
    - 昨日收盤價 < 前高，今日收盤價 > 前高 (首根站上)。
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
-2. 【5/10/20MA 均線糾結突破第一根】 (MA Squeeze & Breakout Bar 1):
-   - 5 日線 (5MA)、10 日線 (10MA)、20 日線 (20MA) 極致糾結壓縮 (三線差幅 <= 2.0%)。
-   - 今日帶量收實體紅 K，股價同時強勢站上 5MA、10MA、20MA，均線開始形成多頭向上發散！
-3. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1):
+2. 【回後買上漲（破5T後重新站上第一根）】 (Pullback & Reclaim 5MA Bar 1):
    - 強勢多頭格局：20MA > 60MA 且股價站穩 20MA 月線。
    - 強勢短洗盤：前 1~3 天回檔跌破 5T 均線 (昨日收盤價 < 5MA)，但守穩在月線 20MA 之上。
    - 今日重新站回 5T：今日收實體紅 K (漲幅>=1.5%)，收盤價首度重新站上 5T 線！
-4. 【疑似頭肩底「破切」第一根】 (Head & Shoulders Bottom Breakout of Neckline):
+3. 【疑似頭肩底「破切」第一根】 (Head & Shoulders Bottom Breakout of Neckline):
    - 打底時間約 1 個月 (28 個交易日)。
    - 完整三底架構：左肩 L1、頭部最低點 Head、右肩低點 L2 (右肩明顯高於頭部，不破底)。
    - 兩次反彈高點：左肩反彈高點 P1 與頭部反彈高點 P2 相連形成「頸線切線」。
    - 昨日收盤仍在切線之下，今日首度帶量長紅「破切站上切線」！
    - 放量 1.5 倍 5MA + 實體紅 K + 站上月線與季線。
+4. 【跳空缺口 D+3 守穩】 (Breakaway Gap Held for D+3):
+   - D 日（3 個交易日前）向上跳空開高（D 日最低價 > D-1 日最高價，不限缺口幅度），且 D 日帶量 >= 1.5 倍 5MA。
+   - D+1、D+2、D+3 連續 3 個交易日「收盤價」皆守穩在缺口下緣之上（不補缺口；盤中下影線回測不計）。
+   - 今日股價維持在月線與季線之上。
+5. 【布林壓縮開口突破】 (Bollinger Band Squeeze & Breakout Bar 1):
+   - 20 日布林通道頻寬收斂至近 60 日極窄區間（頻寬 <= 12% 且在近 60 日最窄 1.3 倍以內）。
+   - 昨日收盤價仍在布林上軌之下，今日帶量收實體紅 K 首度突破布林上軌，且通道開口張開。
 
 【完整全名單推播 (無截斷)】
 - 不再限制只推送前幾檔！只要符合條件的股票「全部完整列出」。
@@ -73,19 +77,27 @@ DEFAULT_CONFIG = {
     "line_user_id": "U5d37c903cbc9e6442aa86bde5e830125",
 
     # 技術面通用門檻
-    "vol_multiplier": 1.5,       # 突破日成交量需大於 5 日均量的 1.5 倍 (型態1~4)
+    "vol_multiplier": 1.5,       # 突破日成交量需大於 5 日均量的 1.5 倍
     "require_red_candle": True,  # 必須收實體紅 K (Close > Open)
     "require_above_ma20": True,  # 股價必須站上 20MA (月線)
     "require_above_ma60": True,  # 股價必須站上 60MA (季線)
     "min_volume_shares": 500,    # 每日最低成交張數 (500 張)
 
-    # 均線糾結參數設定
-    "ma_squeeze_threshold_pct": 2.0, # 5MA/10MA/20MA 差幅門檻 (2.0% 以內視為極致糾結)
-
     # 「回後買上漲」精準過濾參數
     "reclaim_5ma_max_pullback_bars": 3, # 跌破 5MA 的回檔天數必須在 3 天以內
     "reclaim_5ma_min_gain_pct": 1.5,    # 今日站回 5T 之紅 K 漲幅至少 1.5% 以上
     "reclaim_5ma_vol_ratio": 1.2,       # 今日成交量至少為 5MA 均量的 1.2 倍
+
+    # 「跳空缺口 D+3 守穩」參數
+    "gap_hold_days": 3,          # 跳空後需守穩天數 (D+1, D+2, D+3 皆不補缺口)
+    "gap_min_pct": 0.0,          # 最小跳空幅度 (0.0% = 不限幅度，只要有缺口就算)
+    "gap_vol_multiplier": 1.5,   # D 日跳空當天成交量需 >= 5MA 均量的 1.5 倍
+
+    # 「布林通道壓縮突破」參數
+    "bb_period": 20,             # 布林通道均線週期 (20 日)
+    "bb_std_dev": 2.0,           # 布林通道標準差倍數 (2.0)
+    "bb_max_squeeze_width_pct": 12.0, # 壓縮時頻寬絕對上限 (12.0% 以內)
+    "bb_squeeze_near_min_ratio": 1.30, # 昨日頻寬須在近 60 日最窄頻寬的 1.30 倍以內
 
     # 波段與底部形態參數
     "base_lookback_days": 28,    # 頭肩底打底觀察天數 (約 1 個月)
@@ -152,23 +164,18 @@ def is_strictly_common_stock(code: str, name: str) -> bool:
     code = str(code).strip().upper()
     name = str(name).strip()
 
-    # 1. 代號長度與格式：必須為嚴格 4 碼純數字
     if not (len(code) == 4 and code.isdigit()):
         return False
 
-    # 2. 排除 ETF (00 開頭)、ETN (01/02 開頭)、TDR (91 開頭)
     if code.startswith(("00", "01", "02", "91")):
         return False
 
-    # 3. 排除可轉債 (CB) 關鍵字
     if any(kw in name for kw in ["債", "CB", "可轉", "轉換公司債", "公司債"]):
         return False
 
-    # 4. 排除權證關鍵字 (認購權證、認售權證、牛熊證、展延權證)
     if any(kw in name for kw in ["權證", "認購", "認售", "牛證", "熊證", "展延", "購", "售", "牛", "熊"]):
         return False
 
-    # 5. 排除特別股關鍵字 (保留「力特」、「特力」等普通股，僅排除真正的特別股)
     if any(kw in name for kw in ["特別股", "甲特", "乙特", "丙特", "丁特", "戊特"]):
         return False
     if name.endswith("特") and name not in ["力特"]:
@@ -180,10 +187,6 @@ def is_strictly_common_stock(code: str, name: str) -> bool:
 def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
     """
     從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃股票代號及名稱。
-    【多層防護機制】：
-    1. 分區過濾：精確定位 HTML 表格中的「股票」區段，略過「特別股」、「可轉換公司債」、「認購(售)權證」等。
-    2. 正則邊界：使用前後邊界 (?<![0-9a-zA-Z])\d{4}(?![0-9a-zA-Z])，防止 5 碼可轉債或 6 碼權證被誤截後 4 碼。
-    3. 語意過濾：調用 is_strictly_common_stock()，徹底杜絕可轉債、權證、特別股。
     """
     print("[資料更新] 正在連線台灣證券交易所 (TWSE) 抓取名冊 (啟用普通股嚴格過濾)... ")
     all_stocks = []
@@ -219,7 +222,6 @@ def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
                                 all_stocks.append((f"{code}{suffix}", f"{code} {name}"))
                                 found_in_section += 1
 
-                # 備用保險機制 (若分區標籤異常，使用嚴格邊界與 is_strictly_common_stock 雙重檢核)
                 if found_in_section == 0:
                     matches = re.findall(r"(?<![0-9a-zA-Z])(\d{4})(?![0-9a-zA-Z])[\s\u3000]+([^\s<\"\'\r\n]+)", html_text)
                     for code, name in matches:
@@ -303,7 +305,7 @@ def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[b
 
 
 def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 3：疑似頭肩底「破切」第一根 (嚴格三波谷架構)"""
+    """型態 4：疑似頭肩底「破切」第一根 (嚴格三波谷架構)"""
     lookback = config.get("base_lookback_days", 28)
     if len(df) < lookback + 10:
         return False, {}
@@ -334,7 +336,6 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     p2_global_idx = head_rel_idx + 1 + p2_rel_idx
     l2_price = float(right_sub['Low'].min())
 
-    # 頭肩底實質檢驗：頭部深度必須比左肩和右肩更深 (至少 1.5% 以上)
     if head_price >= l1_price * 0.985 or head_price >= l2_price * 0.985:
         return False, {}
     if l2_price <= head_price:
@@ -360,37 +361,9 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     return False, {}
 
 
-def check_ma_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 4：5日、10日、20日均線極致糾結出量突破第一根"""
-    today = df.iloc[-1]
-    ma5 = today['MA5']
-    ma10 = today['MA10']
-    ma20 = today['MA20']
-
-    if pd.isnull(ma5) or pd.isnull(ma10) or pd.isnull(ma20) or ma20 == 0:
-        return False, {}
-
-    mas = [float(ma5), float(ma10), float(ma20)]
-    max_ma = max(mas)
-    min_ma = min(mas)
-    spread_pct = (max_ma - min_ma) / min_ma * 100.0
-
-    threshold = config.get("ma_squeeze_threshold_pct", 2.0)
-    is_squeezed = spread_pct <= threshold
-    above_all_mas = float(today['Close']) > max_ma
-
-    if is_squeezed and above_all_mas:
-        return True, {
-            "name": "均線糾結突破",
-            "key_price": round(float(max_ma), 2),
-            "detail": f"5/10/20MA極致糾結(差{spread_pct:.1f}%)，今日帶量發散站上"
-        }
-    return False, {}
-
-
 def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """
-    型態 5：強勢股【回後買上漲】（均線多頭回檔跌破5T線，今日首度重新站上5T第一根）
+    型態 3：強勢股【回後買上漲】（均線多頭回檔跌破5T線，今日首度重新站上5T第一根）
     """
     if len(df) < 65:
         return False, {}
@@ -423,6 +396,90 @@ def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tupl
     return False, {}
 
 
+def check_gap_hold_d3(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """
+    型態 5：跳空缺口 D+3 守穩（三日不補缺口，以收盤價判定、盤中下影線不計）
+    - D 日（hold_days 個交易日前）出現向上跳空缺口：D 日最低價 > D-1 日最高價（不限幅度，只要有缺口就算）。
+    - D 日帶量上攻（D 日成交量 >= D-1 日 5 日均量的 1.5 倍，且收盤 >= 開盤與前收）。
+    - D+1 至 D+3（含今日）連續 3 天「收盤價」皆嚴格守在缺口下緣（D-1 日最高價）之上，未被回補！
+    """
+    hold_days = config.get("gap_hold_days", 3)
+    if len(df) < hold_days + 10:
+        return False, {}
+
+    day_d_prev = df.iloc[-(hold_days + 2)]  # D-1
+    day_d = df.iloc[-(hold_days + 1)]       # D (跳空日)
+    hold_window = df.iloc[-hold_days:]      # D+1 .. D+3 (含今日)
+
+    prev_high = float(day_d_prev['High'])
+    d_low = float(day_d['Low'])
+    if prev_high <= 0 or d_low <= prev_high:
+        return False, {}
+
+    gap_pct = (d_low - prev_high) / prev_high * 100.0
+    min_gap_pct = config.get("gap_min_pct", 0.0)
+    if min_gap_pct > 0 and gap_pct < min_gap_pct:
+        return False, {}
+
+    # D 日須收漲且未收黑崩跌
+    if float(day_d['Close']) <= float(day_d_prev['Close']) or float(day_d['Close']) < float(day_d['Open']):
+        return False, {}
+
+    # D 日跳空當天必須有量能配合
+    d_prev_vol_ma5 = float(day_d_prev['Vol_MA5']) if pd.notnull(day_d_prev['Vol_MA5']) else 0.0
+    if d_prev_vol_ma5 <= 0 or float(day_d['Volume']) < d_prev_vol_ma5 * config.get("gap_vol_multiplier", 1.5):
+        return False, {}
+
+    # D+1 ~ D+3 連續 3 日收盤價皆不得回補缺口 (盤中低點回測不算)
+    if not (hold_window['Close'] > prev_high).all():
+        return False, {}
+
+    return True, {
+        "name": "跳空缺口D+3守穩",
+        "key_price": round(prev_high, 2),
+        "detail": f"D日跳空{gap_pct:.1f}%，連{hold_days}日收盤守穩缺口({prev_high:.2f})不補"
+    }
+
+
+def check_bollinger_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """
+    型態 6：布林通道壓縮開口突破第一根
+    - 20 日布林通道頻寬收斂至近 60 日極窄水準（<= 12% 且 <= 近 60 日最窄頻寬的 1.30 倍）。
+    - 昨日收盤價仍在布林上軌之下，今日收盤首度站上布林上軌，且通道頻寬開始張開。
+    """
+    bb_period = config.get("bb_period", 20)
+    if len(df) < bb_period + 40:
+        return False, {}
+
+    today = df.iloc[-1]
+    yesterday = df.iloc[-2]
+
+    if pd.isnull(today['BB_Upper']) or pd.isnull(yesterday['BB_Upper']) or pd.isnull(yesterday['BB_Width']):
+        return False, {}
+
+    bb_width_yest = float(yesterday['BB_Width'])
+    bb_width_today = float(today['BB_Width'])
+
+    recent_bb_widths = df['BB_Width'].iloc[-61:-1].dropna()
+    if len(recent_bb_widths) < 20:
+        return False, {}
+
+    q25_bb_width = float(recent_bb_widths.quantile(0.25))
+    max_allowed_width = config.get("bb_max_squeeze_width_pct", 12.0)
+
+    is_squeezed = (bb_width_yest <= max_allowed_width) and (bb_width_yest <= max(q25_bb_width, 5.0))
+    is_first_break = (float(yesterday['Close']) <= float(yesterday['BB_Upper'])) and (float(today['Close']) > float(today['BB_Upper']))
+    is_expanding = bb_width_today > bb_width_yest
+
+    if is_squeezed and is_first_break and is_expanding:
+        return True, {
+            "name": "布林壓縮突破",
+            "key_price": round(float(today['BB_Upper']), 2),
+            "detail": f"布林頻寬壓縮至{bb_width_yest:.1f}%，今日帶量突破上軌({float(today['BB_Upper']):.2f})"
+        }
+    return False, {}
+
+
 def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
     """綜合檢驗五大型態，並套用量價配合與均線濾網"""
     df = df.copy()
@@ -431,6 +488,13 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
     df['Vol_MA5'] = df['Volume'].rolling(5).mean()
+
+    bb_period = config.get("bb_period", 20)
+    bb_std_mult = config.get("bb_std_dev", 2.0)
+    bb_std = df['Close'].rolling(bb_period).std(ddof=0)
+    df['BB_Upper'] = df['MA20'] + bb_std_mult * bb_std
+    df['BB_Lower'] = df['MA20'] - bb_std_mult * bb_std
+    df['BB_Width'] = ((df['BB_Upper'] - df['BB_Lower']) / df['MA20']) * 100.0
 
     today = df.iloc[-1]
     yesterday = df.iloc[-2]
@@ -463,29 +527,38 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
         details.append(p1_info["detail"])
         key_prices.append(f"前高 {p1_info['key_price']}")
 
-    # 型態 2: 5/10/20MA 均線糾結突破 (極致壓縮帶量發散)
-    p2_ok, p2_info = check_ma_squeeze_breakout(df, config)
-    if p2_ok:
-        matched_patterns.append("【均線糾結突破】")
-        details.append(p2_info["detail"])
-        key_prices.append(f"糾結頂 {p2_info['key_price']}")
-
-    # 型態 3: 強勢股【回後買上漲】(守穩月線重返5T)
+    # 型態 2: 強勢股【回後買上漲】(守穩月線重返5T)
     p3_ok, p3_info = check_reclaim_5ma_breakout(df, config)
     if p3_ok:
         matched_patterns.append("【回後買上漲】")
         details.append(p3_info["detail"])
         key_prices.append(f"5T線 {p3_info['key_price']}")
 
-    # 型態 4: 疑似頭肩底「破切」第一根
+    # 型態 3: 疑似頭肩底「破切」第一根
     p4_ok, p4_info = check_head_and_shoulders_bottom(df, config)
     if p4_ok:
         matched_patterns.append("【頭肩底破切】")
         details.append(p4_info["detail"])
         key_prices.append(f"切線 {p4_info['key_price']}")
 
+    # 型態 4: 跳空缺口 D+3 守穩 (D日跳空帶量 + 連3日收盤不補缺口)
+    p5_ok, p5_info = check_gap_hold_d3(df, config)
+    if p5_ok:
+        matched_patterns.append("【跳空缺口D+3守穩】")
+        details.append(p5_info["detail"])
+        key_prices.append(f"缺口緣 {p5_info['key_price']}")
+
+    # 型態 5: 布林通道壓縮開口突破
+    p6_ok, p6_info = check_bollinger_squeeze_breakout(df, config)
+    if p6_ok:
+        matched_patterns.append("【布林壓縮突破】")
+        details.append(p6_info["detail"])
+        key_prices.append(f"布林上軌 {p6_info['key_price']}")
+
     is_pattern_hit = len(matched_patterns) > 0
-    is_volume_valid = standard_volume_price_ok or ("【回後買上漲】" in matched_patterns)
+    # 「回後買上漲」與「跳空缺口D+3守穩」皆有各自專屬的量能與K棒檢驗，不強迫 D+3 當日再度爆量 1.5x
+    has_self_validated_pattern = any(p in matched_patterns for p in ["【回後買上漲】", "【跳空缺口D+3守穩】"])
+    is_volume_valid = standard_volume_price_ok or has_self_validated_pattern
 
     fully_qualified = is_pattern_hit and is_volume_valid and ma_ok and liquidity_ok
 
@@ -513,7 +586,6 @@ def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, A
     else:
         symbol, name = item, item
 
-    # 嚴格防護過濾：確認代號與名稱為純普通股 (排除可轉債、權證、特別股)
     clean_code = re.sub(r"\.(TW|TWO)$", "", str(symbol).strip().upper())
     if not is_strictly_common_stock(clean_code, str(name)):
         return None
@@ -572,7 +644,6 @@ def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str,
     max_chars = config.get("line_bubble_max_chars", 450)
     today_date = datetime.date.today().strftime("%Y/%m/%d")
 
-    # 緊湊高密度條列格式 (每檔約 32~38 字，完整列出型態與關鍵數據)
     formatted_items = []
     for h in hits:
         symbol = h.get("symbol", "")
@@ -593,7 +664,6 @@ def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str,
 
     for item in formatted_items:
         item_len = len(item) + 4
-        # 若加入此檔股票會超過 450 字，則開立新泡泡
         if current_len + item_len > max_chars:
             bubbles.append("\n\n".join(current_bubble_lines))
             current_bubble_lines = [item]
@@ -605,7 +675,6 @@ def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str,
     if current_bubble_lines:
         bubbles.append("\n\n".join(current_bubble_lines))
 
-    # 包裝為 LINE Messaging API 的 messages 物件清單
     return [{"type": "text", "text": b} for b in bubbles]
 
 
@@ -616,7 +685,6 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
     headers = ["代號", "名稱/備註", "收盤價", "今日漲跌", "命中型態", "關鍵價位", "量比(5MA)", "成交張數", "判定"]
     table_rows = []
     
-    # 終端機表格完整列出所有命中標的！
     display_list = hits if hits else results[:15]
     for r in display_list:
         status_flag = "🎯 命中推薦" if r["qualified"] else "— 未符合"
@@ -638,7 +706,6 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             print(row)
     print("=" * 96)
 
-    # 匯出 CSV 完整紀錄
     today_str = datetime.date.today().strftime("%Y%m%d")
     csv_file = f"tw_breakout_scan_{today_str}.csv"
     pd.DataFrame(results).to_csv(csv_file, index=False, encoding="utf-8-sig")
@@ -657,11 +724,9 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             "Authorization": f"Bearer {line_token}"
         }
 
-        # LINE API 單次請求最多支援發送 5 個泡泡，若超過 5 個則分批次全部發送完畢，一檔不漏！
         for batch_idx in range(0, len(message_bubbles), 5):
             batch_bubbles = message_bubbles[batch_idx : batch_idx + 5]
             
-            # 廣播模式 (Broadcast)
             if is_broadcast:
                 print(f"[LINE 官方帳號] 正在廣播發送第 {batch_idx//5 + 1} 批泡泡 ({len(batch_bubbles)} 則)...")
                 url = "https://api.line.me/v2/bot/message/broadcast"
@@ -675,7 +740,6 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
                 except Exception as e:
                     print(f"✗ [連線異常] {e}")
 
-            # 私訊模式 (Push)
             elif line_uid:
                 print(f"[LINE 私訊] 正在發送第 {batch_idx//5 + 1} 批泡泡至個人...")
                 url = "https://api.line.me/v2/bot/message/push"

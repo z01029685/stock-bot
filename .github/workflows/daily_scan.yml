@@ -1,7 +1,7 @@
 name: Taiwan Stock Daily Breakout Scan
 
 on:
-  workflow_dispatch: # 僅由外部 trigger (cron-job.org) 於每日 14:00 觸發，已移除 schedule 徹底杜絕晚上重複執行！
+  workflow_dispatch: # 由外部 trigger (cron-job.org) 觸發：可設定盤中 (如 10:00, 11:30, 13:00) 與盤後 (14:00) 多時段
 
 jobs:
   scan:
@@ -19,6 +19,26 @@ jobs:
         run: |
           pip install yfinance pandas tabulate requests
 
-      - name: Run Stock Breakout Scan
+      - name: Get Taipei Date for Cache
+        id: tw_date
+        run: |
+          echo "date=$(TZ='Asia/Taipei' date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Restore Intraday Dedup Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: notified_intraday_cache.json
+          key: intraday-dedup-${{ steps.tw_date.outputs.date }}-${{ github.run_id }}
+          restore-keys: |
+            intraday-dedup-${{ steps.tw_date.outputs.date }}-
+
+      - name: Run Stock Breakout Scan (Auto Intraday / Post-Close)
         run: |
           python tw_stock_breakout_monitor.py
+
+      - name: Save Intraday Dedup Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: notified_intraday_cache.json
+          key: intraday-dedup-${{ steps.tw_date.outputs.date }}-${{ github.run_id }}

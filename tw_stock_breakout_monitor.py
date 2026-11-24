@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-台股「五大經典強勢起漲型態」全自動極速監控腳本 (全標的完整推播版)
+台股「五大經典強勢起漲型態」全自動極速監控腳本 (盤中即時 + 盤後確認雙模式)
 =============================================================================
-【五大起漲型態演算法】（已移除圓弧底與均線糾結，精煉保留實戰五大強勢型態）
+【五大起漲型態演算法】
 1. 【回檔突破前高第一根】 (Pullback Breakout Bar 1):
    - 40 天波段高點後，至少回檔整理 3 天以上。
    - 昨日收盤價 < 前高，今日收盤價 > 前高 (首根站上)。
@@ -24,17 +24,18 @@
    - D+1、D+2、D+3 連續 3 個交易日「收盤價」皆守穩在缺口下緣之上（不補缺口；盤中下影線回測不計）。
    - 今日股價維持在月線與季線之上。
 5. 【布林壓縮開口突破】 (Bollinger Band Squeeze & Breakout Bar 1):
-   - 20 日布林通道頻寬收斂至近 60 日極窄區間（頻寬 <= 12% 且在近 60 日最窄 1.3 倍以內）。
+   - 20 日布林通道頻寬收斂至近 60 日極窄區間（頻寬 <= 12% 且在近 60 日最窄前 25% 以內）。
    - 昨日收盤價仍在布林上軌之下，今日帶量收實體紅 K 首度突破布林上軌，且通道開口張開。
 
-【完整全名單推播 (無截斷)】
-- 不再限制只推送前幾檔！只要符合條件的股票「全部完整列出」。
-- 自動依 450 字上限分拆訊息泡泡，並以每批最多 5 個泡泡自動連續發送，確保全市場命中標的 100% 送達手機！
+【盤中即時預估量 + 去重推播雙模式】
+- 盤中時段 (09:00~13:30 台北時間) 自動切換為【盤中預估量模式】，依台股 270 分鐘交易時間換算預估量，型態一成形即先推播提醒關注。
+- 搭配 `--dedup-file` 快取機制，盤中同一檔同型態只推播一次不洗版；13:30 收盤後自動切換為【盤後確認模式】發送完整最終名單。
 =============================================================================
 """
 
 import os
 import sys
+import json
 import time
 import re
 import argparse
@@ -65,6 +66,8 @@ except ImportError:
     HAS_REQUESTS = False
 
 
+TAIPEI_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
 # =============================================================================
 # 系統預設參數設定 (已綁定你的專屬 LINE 設定)
 # =============================================================================
@@ -81,7 +84,11 @@ DEFAULT_CONFIG = {
     "require_red_candle": True,  # 必須收實體紅 K (Close > Open)
     "require_above_ma20": True,  # 股價必須站上 20MA (月線)
     "require_above_ma60": True,  # 股價必須站上 60MA (季線)
-    "min_volume_shares": 500,    # 每日最低成交張數 (500 張)
+    "min_volume_shares": 500,    # 每日最低成交張數 (500 張；盤中以預估量計算)
+
+    # 盤中即時預估量設定
+    "intraday_max_proj_factor": 8.0,   # 盤中預估量最大放大倍數上限 (避免開盤前幾分鐘過度失真)
+    "intraday_min_actual_shares": 100, # 盤中實際成交張數最低下限 (100 張，過濾開盤無量冷門股)
 
     # 「回後買上漲」精準過濾參數
     "reclaim_5ma_max_pullback_bars": 3, # 跌破 5MA 的回檔天數必須在 3 天以內
@@ -97,7 +104,7 @@ DEFAULT_CONFIG = {
     "bb_period": 20,             # 布林通道均線週期 (20 日)
     "bb_std_dev": 2.0,           # 布林通道標準差倍數 (2.0)
     "bb_max_squeeze_width_pct": 12.0, # 壓縮時頻寬絕對上限 (12.0% 以內)
-    "bb_squeeze_near_min_ratio": 1.30, # 昨日頻寬須在近 60 日最窄頻寬的 1.30 倍以內
+    "bb_squeeze_near_min_ratio": 1.30,
 
     # 波段與底部形態參數
     "base_lookback_days": 28,    # 頭肩底打底觀察天數 (約 1 個月)
@@ -150,17 +157,48 @@ CORE_TW_STOCKS = sorted(list(set(CORE_TW_STOCKS)))
 
 
 # =============================================================================
+# 盤中時段與預估量計算工具
+# =============================================================================
+def get_scan_session_info(mode: str = "auto", now_tw: Optional[datetime.datetime] = None, max_proj_factor: float = 8.0) -> Dict[str, Any]:
+    """
+    判斷目前為【盤中即時模式】或【盤後確認模式】，並計算台股 270 分鐘交易時段的預估量放大係數。
+    """
+    if now_tw is None:
+        now_tw = datetime.datetime.now(TAIPEI_TZ)
+
+    current_min = now_tw.hour * 60 + now_tw.minute
+    market_open_min = 9 * 60        # 09:00
+    market_close_min = 13 * 60 + 30 # 13:30
+    is_weekday = now_tw.weekday() < 5
+    in_trading_hours = is_weekday and (market_open_min <= current_min < market_close_min)
+
+    if mode == "intraday":
+        is_intraday = True
+    elif mode == "close":
+        is_intraday = False
+    else:
+        is_intraday = in_trading_hours
+
+    if is_intraday:
+        elapsed = max(current_min - market_open_min, 15) if in_trading_hours else 135
+        proj_factor = min(270.0 / elapsed, max_proj_factor)
+    else:
+        proj_factor = 1.0
+
+    return {
+        "is_intraday": is_intraday,
+        "proj_factor": round(proj_factor, 2),
+        "now_tw": now_tw,
+        "time_str": now_tw.strftime("%H:%M"),
+        "date_str": now_tw.strftime("%Y-%m-%d"),
+    }
+
+
+# =============================================================================
 # 核心模組 1：資料取得 (支援超時保護)
 # =============================================================================
 def is_strictly_common_stock(code: str, name: str) -> bool:
-    """
-    台股純普通股嚴格過濾器：
-    1. 代號格式：必須為嚴格 4 碼純數字 (完全排除 5 碼可轉債、6 碼權證、帶英文字母特別股)。
-    2. 排除非普通股代號：排除 00 開頭 (ETF)、01/02 開頭 (ETN)、91 開頭 (TDR)。
-    3. 排除可轉債 (CB)：名稱包含「債」、「CB」、「可轉」、「轉換公司債」。
-    4. 排除權證 (Warrants)：名稱包含「權證」、「認購」、「認售」、「牛證」、「熊證」、「展延」，或含「購/售/牛/熊」。
-    5. 排除特別股：名稱包含「特別股」、「甲特」、「乙特」、「丙特」、「丁特」、「戊特」，或名稱以「特」結尾 (排除「力特」等普通股除外)。
-    """
+    """台股純普通股嚴格過濾器"""
     code = str(code).strip().upper()
     name = str(name).strip()
 
@@ -185,9 +223,7 @@ def is_strictly_common_stock(code: str, name: str) -> bool:
 
 
 def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
-    """
-    從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃股票代號及名稱。
-    """
+    """從台灣證交所 (TWSE) 官方清單自動爬取全台股所有上市與上櫃普通股代號及名稱"""
     print("[資料更新] 正在連線台灣證券交易所 (TWSE) 抓取名冊 (啟用普通股嚴格過濾)... ")
     all_stocks = []
     modes = [(2, "上市"), (4, "上櫃")]
@@ -244,9 +280,7 @@ def fetch_all_market_stock_codes() -> List[Tuple[str, str]]:
 
 
 def fetch_stock_daily_data(symbol: str, timeout_sec: float = 3.0) -> Optional[pd.DataFrame]:
-    """
-    抓取單檔股票日 K 線 (含嚴格超時防護)
-    """
+    """抓取單檔股票日 K 線 (含盤中即時最新一根 K 棒)"""
     if not HAS_YFINANCE:
         return None
 
@@ -305,7 +339,7 @@ def check_pullback_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[b
 
 
 def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """型態 4：疑似頭肩底「破切」第一根 (嚴格三波谷架構)"""
+    """型態 3：疑似頭肩底「破切」第一根 (嚴格三波谷架構)"""
     lookback = config.get("base_lookback_days", 28)
     if len(df) < lookback + 10:
         return False, {}
@@ -361,10 +395,8 @@ def check_head_and_shoulders_bottom(df: pd.DataFrame, config: Dict[str, Any]) ->
     return False, {}
 
 
-def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """
-    型態 3：強勢股【回後買上漲】（均線多頭回檔跌破5T線，今日首度重新站上5T第一根）
-    """
+def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any], effective_today_vol: Optional[float] = None) -> Tuple[bool, Dict[str, Any]]:
+    """型態 2：強勢股【回後買上漲】（均線多頭回檔跌破5T線，今日首度重新站上5T第一根）"""
     if len(df) < 65:
         return False, {}
 
@@ -383,9 +415,10 @@ def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tupl
     price_change_pct = ((today['Close'] - yesterday['Close']) / yesterday['Close']) * 100
     is_red_candle = (today['Close'] > today['Open']) and (price_change_pct >= min_gain)
 
+    today_vol = effective_today_vol if effective_today_vol is not None else float(today['Volume'])
     ref_vol_ma = yesterday['Vol_MA5']
-    vol_ratio = (today['Volume'] / ref_vol_ma) if ref_vol_ma > 0 else 0.0
-    vol_reclaim_ok = (vol_ratio >= config.get("reclaim_5ma_vol_ratio", 1.2)) or (today['Volume'] >= yesterday['Volume'] * 1.1)
+    vol_ratio = (today_vol / ref_vol_ma) if ref_vol_ma > 0 else 0.0
+    vol_reclaim_ok = (vol_ratio >= config.get("reclaim_5ma_vol_ratio", 1.2)) or (today_vol >= yesterday['Volume'] * 1.1)
 
     if uptrend_ok and is_valid_pullback and held_20ma and today_reclaim_5ma and is_red_candle and vol_reclaim_ok:
         return True, {
@@ -398,10 +431,7 @@ def check_reclaim_5ma_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tupl
 
 def check_gap_hold_d3(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """
-    型態 5：跳空缺口 D+3 守穩（三日不補缺口，以收盤價判定、盤中下影線不計）
-    - D 日（hold_days 個交易日前）出現向上跳空缺口：D 日最低價 > D-1 日最高價（不限幅度，只要有缺口就算）。
-    - D 日帶量上攻（D 日成交量 >= D-1 日 5 日均量的 1.5 倍，且收盤 >= 開盤與前收）。
-    - D+1 至 D+3（含今日）連續 3 天「收盤價」皆嚴格守在缺口下緣（D-1 日最高價）之上，未被回補！
+    型態 4：跳空缺口 D+3 守穩（三日不補缺口，以收盤價/現價判定、盤中下影線不計）
     """
     hold_days = config.get("gap_hold_days", 3)
     if len(df) < hold_days + 10:
@@ -421,16 +451,13 @@ def check_gap_hold_d3(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, D
     if min_gap_pct > 0 and gap_pct < min_gap_pct:
         return False, {}
 
-    # D 日須收漲且未收黑崩跌
     if float(day_d['Close']) <= float(day_d_prev['Close']) or float(day_d['Close']) < float(day_d['Open']):
         return False, {}
 
-    # D 日跳空當天必須有量能配合
     d_prev_vol_ma5 = float(day_d_prev['Vol_MA5']) if pd.notnull(day_d_prev['Vol_MA5']) else 0.0
     if d_prev_vol_ma5 <= 0 or float(day_d['Volume']) < d_prev_vol_ma5 * config.get("gap_vol_multiplier", 1.5):
         return False, {}
 
-    # D+1 ~ D+3 連續 3 日收盤價皆不得回補缺口 (盤中低點回測不算)
     if not (hold_window['Close'] > prev_high).all():
         return False, {}
 
@@ -442,11 +469,7 @@ def check_gap_hold_d3(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, D
 
 
 def check_bollinger_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """
-    型態 6：布林通道壓縮開口突破第一根
-    - 20 日布林通道頻寬收斂至近 60 日極窄水準（<= 12% 且 <= 近 60 日最窄頻寬的 1.30 倍）。
-    - 昨日收盤價仍在布林上軌之下，今日收盤首度站上布林上軌，且通道頻寬開始張開。
-    """
+    """型態 5：布林通道壓縮開口突破第一根"""
     bb_period = config.get("bb_period", 20)
     if len(df) < bb_period + 40:
         return False, {}
@@ -480,8 +503,8 @@ def check_bollinger_squeeze_breakout(df: pd.DataFrame, config: Dict[str, Any]) -
     return False, {}
 
 
-def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
-    """綜合檢驗五大型態，並套用量價配合與均線濾網"""
+def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any], session_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """綜合檢驗五大型態，並支援盤中即時預估量換算"""
     df = df.copy()
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
@@ -500,8 +523,19 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     yesterday = df.iloc[-2]
     today_date = today.name.strftime('%Y-%m-%d') if hasattr(today.name, 'strftime') else str(today.name)
 
+    # 盤中預估量計算：僅當今天為盤中模式且最後一根 K 棒確實為今日日期時才套用預估係數
+    is_intraday = bool(session_info and session_info.get("is_intraday", False))
+    proj_factor = 1.0
+    if is_intraday and session_info:
+        if today_date == session_info.get("date_str"):
+            proj_factor = float(session_info.get("proj_factor", 1.0))
+
+    actual_shares = int(today['Volume'] / 1000)
+    effective_vol = float(today['Volume']) * proj_factor
+    effective_shares = int(effective_vol / 1000)
+
     ref_vol_ma = yesterday['Vol_MA5']
-    vol_ratio = (today['Volume'] / ref_vol_ma) if ref_vol_ma > 0 else 0.0
+    vol_ratio = (effective_vol / ref_vol_ma) if ref_vol_ma > 0 else 0.0
     is_red_candle = (today['Close'] > today['Open'])
     price_change_pct = ((today['Close'] - yesterday['Close']) / yesterday['Close']) * 100
     
@@ -513,50 +547,51 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
     above_ma60 = (today['Close'] > today['MA60']) if (config["require_above_ma60"] and pd.notnull(today['MA60'])) else True
     ma_ok = above_ma20 and above_ma60
 
-    volume_shares = int(today['Volume'] / 1000)
-    liquidity_ok = volume_shares >= config.get("min_volume_shares", 500)
+    if is_intraday:
+        liquidity_ok = (effective_shares >= config.get("min_volume_shares", 500)) and (actual_shares >= config.get("intraday_min_actual_shares", 100))
+    else:
+        liquidity_ok = actual_shares >= config.get("min_volume_shares", 500)
 
     matched_patterns = []
     details = []
     key_prices = []
 
-    # 型態 1: 回檔突破前高 (波段整理後首根突破)
+    # 型態 1: 回檔突破前高
     p1_ok, p1_info = check_pullback_breakout(df, config)
     if p1_ok:
         matched_patterns.append("【回檔突破】")
         details.append(p1_info["detail"])
         key_prices.append(f"前高 {p1_info['key_price']}")
 
-    # 型態 2: 強勢股【回後買上漲】(守穩月線重返5T)
-    p3_ok, p3_info = check_reclaim_5ma_breakout(df, config)
-    if p3_ok:
+    # 型態 2: 強勢股【回後買上漲】
+    p2_ok, p2_info = check_reclaim_5ma_breakout(df, config, effective_today_vol=effective_vol)
+    if p2_ok:
         matched_patterns.append("【回後買上漲】")
-        details.append(p3_info["detail"])
-        key_prices.append(f"5T線 {p3_info['key_price']}")
+        details.append(p2_info["detail"])
+        key_prices.append(f"5T線 {p2_info['key_price']}")
 
     # 型態 3: 疑似頭肩底「破切」第一根
-    p4_ok, p4_info = check_head_and_shoulders_bottom(df, config)
-    if p4_ok:
+    p3_ok, p3_info = check_head_and_shoulders_bottom(df, config)
+    if p3_ok:
         matched_patterns.append("【頭肩底破切】")
-        details.append(p4_info["detail"])
-        key_prices.append(f"切線 {p4_info['key_price']}")
+        details.append(p3_info["detail"])
+        key_prices.append(f"切線 {p3_info['key_price']}")
 
-    # 型態 4: 跳空缺口 D+3 守穩 (D日跳空帶量 + 連3日收盤不補缺口)
-    p5_ok, p5_info = check_gap_hold_d3(df, config)
-    if p5_ok:
+    # 型態 4: 跳空缺口 D+3 守穩
+    p4_ok, p4_info = check_gap_hold_d3(df, config)
+    if p4_ok:
         matched_patterns.append("【跳空缺口D+3守穩】")
-        details.append(p5_info["detail"])
-        key_prices.append(f"缺口緣 {p5_info['key_price']}")
+        details.append(p4_info["detail"])
+        key_prices.append(f"缺口緣 {p4_info['key_price']}")
 
     # 型態 5: 布林通道壓縮開口突破
-    p6_ok, p6_info = check_bollinger_squeeze_breakout(df, config)
-    if p6_ok:
+    p5_ok, p5_info = check_bollinger_squeeze_breakout(df, config)
+    if p5_ok:
         matched_patterns.append("【布林壓縮突破】")
-        details.append(p6_info["detail"])
-        key_prices.append(f"布林上軌 {p6_info['key_price']}")
+        details.append(p5_info["detail"])
+        key_prices.append(f"布林上軌 {p5_info['key_price']}")
 
     is_pattern_hit = len(matched_patterns) > 0
-    # 「回後買上漲」與「跳空缺口D+3守穩」皆有各自專屬的量能與K棒檢驗，不強迫 D+3 當日再度爆量 1.5x
     has_self_validated_pattern = any(p in matched_patterns for p in ["【回後買上漲】", "【跳空缺口D+3守穩】"])
     is_volume_valid = standard_volume_price_ok or has_self_validated_pattern
 
@@ -568,19 +603,21 @@ def evaluate_stock_patterns(df: pd.DataFrame, config: Dict[str, Any]) -> Dict[st
         "close": round(float(today['Close']), 2),
         "change_pct": round(float(price_change_pct), 2),
         "vol_ratio": round(float(vol_ratio), 2),
-        "volume_shares": volume_shares,
+        "volume_shares": effective_shares,
+        "actual_shares": actual_shares,
         "matched_patterns": " + ".join(matched_patterns) if matched_patterns else "無型態",
         "key_prices": " / ".join(key_prices) if key_prices else "—",
         "pattern_details": "；".join(details) if details else "—",
         "volume_price_ok": is_volume_valid,
         "ma_ok": ma_ok,
+        "is_intraday": is_intraday,
     }
 
 
 # =============================================================================
 # 核心模組 3：高並行高速掃描
 # =============================================================================
-def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def scan_stock_worker(item: Any, config: Dict[str, Any], session_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(item, tuple):
         symbol, name = item
     else:
@@ -593,21 +630,22 @@ def scan_stock_worker(item: Any, config: Dict[str, Any]) -> Optional[Dict[str, A
     timeout_sec = config.get("ticker_timeout_sec", 3.0)
     df = fetch_stock_daily_data(symbol, timeout_sec=timeout_sec)
     if df is not None:
-        res = evaluate_stock_patterns(df, config)
+        res = evaluate_stock_patterns(df, config, session_info=session_info)
         res["symbol"] = re.sub(r"\.(TW|TWO)$", "", str(symbol).strip().upper())
         res["name"] = name
         return res
     return None
 
 
-def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max_workers: int = 14) -> List[Dict[str, Any]]:
-    print(f"\n[極速掃描啟動] 正以多執行緒 (Threads: {max_workers}) 掃描 {len(stock_candidates)} 檔標的...")
+def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], session_info: Dict[str, Any], max_workers: int = 14) -> List[Dict[str, Any]]:
+    mode_label = f"盤中即時模式 (預估量係數 {session_info['proj_factor']}x)" if session_info["is_intraday"] else "盤後確認模式"
+    print(f"\n[極速掃描啟動 - {mode_label}] 正以多執行緒 (Threads: {max_workers}) 掃描 {len(stock_candidates)} 檔標的...")
     results = []
     start_t = time.time()
     max_total_sec = config.get("max_scan_total_sec", 600)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(scan_stock_worker, item, config): item for item in stock_candidates}
+        futures = {executor.submit(scan_stock_worker, item, config, session_info): item for item in stock_candidates}
         done_count = 0
         total_count = len(futures)
         
@@ -632,17 +670,62 @@ def execute_market_scan(stock_candidates: List[Any], config: Dict[str, Any], max
 
 
 # =============================================================================
+# 盤中去重快取機制 (避免盤中多次掃描重複洗版)
+# =============================================================================
+def filter_and_update_intraday_dedup(hits: List[Dict[str, Any]], dedup_file: Optional[str], session_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    若為盤中模式且有指定 dedup_file：過濾掉今日已經推播過「相同股票+相同型態」的標的。
+    若為盤後模式，則完整保留所有標的並發送最終確認名單。
+    """
+    if not session_info.get("is_intraday") or not dedup_file:
+        return hits
+
+    today_str = session_info["date_str"]
+    cache = {"date": today_str, "alerted": {}}
+
+    if os.path.exists(dedup_file):
+        try:
+            with open(dedup_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if loaded.get("date") == today_str:
+                cache = loaded
+        except Exception:
+            pass
+
+    alerted_map = cache.setdefault("alerted", {})
+    new_hits = []
+    for h in hits:
+        sym = h.get("symbol", "")
+        pat = h.get("matched_patterns", "")
+        key = f"{sym}|{pat}"
+        if key not in alerted_map:
+            new_hits.append(h)
+            alerted_map[key] = session_info["time_str"]
+
+    try:
+        with open(dedup_file, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[去重警告] 寫入快取失敗: {e}")
+
+    skipped = len(hits) - len(new_hits)
+    if skipped > 0:
+        print(f"[盤中去重] 已略過 {skipped} 檔今日盤中已通知過的相同型態標的，本次新命中 {len(new_hits)} 檔。")
+    return new_hits
+
+
+# =============================================================================
 # 核心模組 4：LINE 官方帳號全標的無截斷推播 (多泡泡自動分批發送)
 # =============================================================================
-def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, str]]:
-    """
-    不限檔數！將所有符合條件的標的全部完整列出，自動分派到多個泡泡中 (每個泡泡 <= 450 字)。
-    """
+def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str, Any], session_info: Dict[str, Any]) -> List[Dict[str, str]]:
+    """不限檔數！將所有符合條件的標的全部完整列出，自動分派到多個泡泡中 (每個泡泡 <= 450 字)"""
     if not hits:
         return []
 
     max_chars = config.get("line_bubble_max_chars", 450)
-    today_date = datetime.date.today().strftime("%Y/%m/%d")
+    today_date = session_info["now_tw"].strftime("%Y/%m/%d")
+    is_intraday = session_info.get("is_intraday", False)
+    vol_label = "預估量比" if is_intraday else "量比"
 
     formatted_items = []
     for h in hits:
@@ -654,11 +737,15 @@ def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str,
         vol = h.get("vol_ratio", 0)
         detail = h.get("pattern_details", "")
         
-        item_str = f"• {symbol} {name} {close} ({pct:+.2f}%)\n  {patterns} | 量比:{vol}x ({detail})"
+        item_str = f"• {symbol} {name} {close} ({pct:+.2f}%)\n  {patterns} | {vol_label}:{vol}x ({detail})"
         formatted_items.append(item_str)
 
     bubbles = []
-    header = f"🔥【台股型態突破全名單】({today_date})\n共篩選出 {len(hits)} 檔強勢起漲/轉強標的："
+    if is_intraday:
+        header = f"⚡【台股盤中即時突破關注】({today_date} {session_info['time_str']})\n共 {len(hits)} 檔盤中成形（採預估量，最終以收盤為準）："
+    else:
+        header = f"🔥【台股型態突破全名單】({today_date})\n共篩選出 {len(hits)} 檔強勢起漲/轉強標的："
+
     current_bubble_lines = [header, "-----------------------------"]
     current_len = len(header) + 32
 
@@ -678,26 +765,28 @@ def build_all_line_message_bubbles(hits: List[Dict[str, Any]], config: Dict[str,
     return [{"type": "text", "text": b} for b in bubbles]
 
 
-def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, Any]):
+def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, Any], session_info: Dict[str, Any], dedup_file: Optional[str] = None):
     hits = [r for r in results if r["qualified"]]
     hits = sorted(hits, key=lambda x: x["change_pct"], reverse=True)
 
-    headers = ["代號", "名稱/備註", "收盤價", "今日漲跌", "命中型態", "關鍵價位", "量比(5MA)", "成交張數", "判定"]
+    vol_col_name = "預估量比" if session_info["is_intraday"] else "量比(5MA)"
+    headers = ["代號", "名稱/備註", "現價/收盤", "今日漲跌", "命中型態", "關鍵價位", vol_col_name, "實際張數", "判定"]
     table_rows = []
     
     display_list = hits if hits else results[:15]
     for r in display_list:
-        status_flag = "🎯 命中推薦" if r["qualified"] else "— 未符合"
+        status_flag = "⚡ 盤中關注" if (r["qualified"] and session_info["is_intraday"]) else ("🎯 命中推薦" if r["qualified"] else "— 未符合")
         chg_str = f"{r['change_pct']:+.2f}%"
         vol_str = f"{r['vol_ratio']:.2f}x"
         table_rows.append([
             r["symbol"], r.get("name", ""), r["close"], chg_str,
             r["matched_patterns"], r["key_prices"], vol_str,
-            f"{r['volume_shares']}張", status_flag
+            f"{r['actual_shares']}張", status_flag
         ])
 
     print("\n" + "=" * 96)
-    print(f"  台股強勢底部/轉強突破掃描報告 (掃描總數: {len(results)} 檔 | 命中突破: {len(hits)} 檔)")
+    mode_tag = "盤中即時關注" if session_info["is_intraday"] else "盤後確認"
+    print(f"  台股強勢突破掃描報告 [{mode_tag}] (掃描總數: {len(results)} 檔 | 命中突破: {len(hits)} 檔)")
     print("=" * 96)
     if HAS_TABULATE:
         print(tabulate(table_rows, headers=headers, tablefmt="fancy_grid"))
@@ -706,18 +795,21 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
             print(row)
     print("=" * 96)
 
-    today_str = datetime.date.today().strftime("%Y%m%d")
+    today_str = session_info["now_tw"].strftime("%Y%m%d")
     csv_file = f"tw_breakout_scan_{today_str}.csv"
     pd.DataFrame(results).to_csv(csv_file, index=False, encoding="utf-8-sig")
     print(f"[CSV 報告] 已匯出完整分析至: {csv_file}")
+
+    # 盤中去重過濾
+    notify_hits = filter_and_update_intraday_dedup(hits, dedup_file, session_info)
 
     line_token = config.get("line_channel_access_token")
     is_broadcast = config.get("line_broadcast", True)
     line_uid = config.get("line_user_id")
     
-    if hits and line_token and HAS_REQUESTS:
-        message_bubbles = build_all_line_message_bubbles(hits, config)
-        print(f"\n[LINE 訊息建構] 已將全部 {len(hits)} 檔股票完整切分為 {len(message_bubbles)} 個短訊息泡泡！")
+    if notify_hits and line_token and HAS_REQUESTS:
+        message_bubbles = build_all_line_message_bubbles(notify_hits, config, session_info)
+        print(f"\n[LINE 訊息建構] 已將 {len(notify_hits)} 檔股票完整切分為 {len(message_bubbles)} 個短訊息泡泡！")
 
         headers = {
             "Content-Type": "application/json",
@@ -753,22 +845,30 @@ def print_and_notify_results(results: List[Dict[str, Any]], config: Dict[str, An
                 except Exception as e:
                     print(f"✗ [連線異常] {e}")
 
-    elif not hits:
-        print("\n[通知] 今日掃描無符合強勢型態之標的，不發送推播干擾。")
+    elif not notify_hits:
+        print("\n[通知] 本次無新增符合強勢型態之標的，不發送推播干擾。")
 
 
 # =============================================================================
 # CLI 命令列進入點
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="台股五大強勢突破型態全自動監控工具")
+    parser = argparse.ArgumentParser(description="台股五大強勢突破型態全自動監控工具 (支援盤中預估量 + 盤後確認)")
     parser.add_argument("--market", choices=["top", "all", "custom"], default="top", 
                         help="掃描範圍: top (精選龍頭與熱門約220檔，預設最快), all (全台股1800+檔), custom (自選)")
+    parser.add_argument("--mode", choices=["auto", "intraday", "close"], default="auto",
+                        help="執行模式: auto (依台北時間自動切換盤中/盤後，預設), intraday (強制盤中預估量), close (強制盤後)")
+    parser.add_argument("--dedup-file", default="notified_intraday_cache.json",
+                        help="盤中去重快取檔路徑 (避免盤中重複推播同一標的)")
     parser.add_argument("--stocks", nargs="+", help="指定自選代號 (如: 2330 2317 6274)")
     parser.add_argument("--threads", type=int, default=14, help="平行掃描執行緒數量 (預設: 14)")
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG.copy()
+    session_info = get_scan_session_info(
+        mode=args.mode,
+        max_proj_factor=config.get("intraday_max_proj_factor", 8.0)
+    )
 
     if args.stocks:
         candidates = [(s, s) for s in args.stocks if is_strictly_common_stock(re.sub(r"\.(TW|TWO)$", "", s), s)]
@@ -778,8 +878,8 @@ def main():
         print(f"[市場範圍] 自動載入台股核心龍頭與高動能精選清單 (共 {len(CORE_TW_STOCKS)} 檔)...")
         candidates = [(s, s) for s in CORE_TW_STOCKS]
 
-    results = execute_market_scan(candidates, config, max_workers=args.threads)
-    print_and_notify_results(results, config)
+    results = execute_market_scan(candidates, config, session_info, max_workers=args.threads)
+    print_and_notify_results(results, config, session_info, dedup_file=args.dedup_file)
 
 
 if __name__ == "__main__":
